@@ -1,10 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { handleDestinationsApi } from '../server/destinations'
 
 export const config = { maxDuration: 60 }
 
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   try {
-    const { handleDestinationsApi } = await import('../server/destinations')
     await handleDestinationsApi(req, res)
   } catch (error) {
     if (res.headersSent) return

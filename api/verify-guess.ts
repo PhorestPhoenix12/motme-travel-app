@@ -1,10 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { handleQuestApi } from '../server/generate-quests'
 
 export const config = { maxDuration: 60 }
 
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   try {
-    const { handleQuestApi } = await import('../server/generate-quests')
     await handleQuestApi(req, res)
   } catch (error) {
     if (res.headersSent) return
