@@ -2,6 +2,16 @@ import { defineConfig, type HtmlTagDescriptor, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'node:path'
+import tls from 'node:tls'
+
+try {
+  tls.setDefaultCACertificates([
+    ...tls.getCACertificates(),
+    ...tls.getCACertificates('system'),
+  ])
+} catch {
+  // Node without system CA merge still starts the preview server.
+}
 
 import siteConfiguration from './.figma/make/site.json'
 
@@ -24,6 +34,7 @@ export default defineConfig(({ mode }) => {
       figmaReactRefreshBoundaryFallback(),
       figmaMakeKitPlugin({ storiesGlob: '/src/**/*.stories.{ts,tsx,js,jsx}' }),
       motmePersistApi(),
+      motmeQuestApi(),
     ],
     resolve: {
       alias: {
@@ -49,22 +60,65 @@ export default defineConfig(({ mode }) => {
   }
 })
 
+function mountApi(
+  match: (url: string) => boolean,
+  load: () => Promise<(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<boolean>>,
+) {
+  return async (
+    req: import('node:http').IncomingMessage,
+    res: import('node:http').ServerResponse,
+    next: () => void,
+  ) => {
+    if (!req.url || !match(req.url)) return next()
+    try {
+      const handle = await load()
+      const handled = await handle(req, res)
+      if (!handled) next()
+    } catch (error) {
+      res.statusCode = 500
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'API failed' }))
+    }
+  }
+}
+
 function motmePersistApi(): Plugin {
+  const middleware = mountApi(
+    url => url.startsWith('/api/me/'),
+    async () => {
+      const { handlePersistApi } = await import('./server/persist-api.ts')
+      return handlePersistApi
+    },
+  )
   return {
     name: 'motme-persist-api',
     configureServer(server) {
-      server.middlewares.use(async (req, res, next) => {
-        if (!req.url?.startsWith('/api/me/')) return next()
-        try {
-          const { handlePersistApi } = await import('./server/persist-api.ts')
-          const handled = await handlePersistApi(req, res)
-          if (!handled) next()
-        } catch (error) {
-          res.statusCode = 500
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Persist API failed' }))
-        }
-      })
+      server.middlewares.use(middleware)
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(middleware)
+    },
+  }
+}
+
+function motmeQuestApi(): Plugin {
+  const middleware = mountApi(
+    url => {
+      const path = url.split('?')[0]
+      return path === '/api/generate-quests' || path === '/api/verify-guess'
+    },
+    async () => {
+      const { handleQuestApi } = await import('./server/generate-quests.ts')
+      return handleQuestApi
+    },
+  )
+  return {
+    name: 'motme-quest-api',
+    configureServer(server) {
+      server.middlewares.use(middleware)
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(middleware)
     },
   }
 }

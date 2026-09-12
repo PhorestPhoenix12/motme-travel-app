@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { SignedIn, SignedOut, SignInButton, SignUpButton, UserButton, useAuth, useUser } from '@clerk/clerk-react'
+import { UserButton, useAuth, useUser } from '@clerk/clerk-react'
 import AccountPage from './AccountPage'
 import AlbumPage from './AlbumPage'
-import { fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, persistTrip, type StoredQuest, type StoredTrip } from './lib/persist'
+import IntroPage, { AuthGateSplash } from './IntroPage'
+import { guessMatchesPlace } from './lib/identify'
+import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, persistTrip, secretForQuest, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
 
 const CLERK_ENABLED = Boolean(import.meta.env.VITE_CLERK_PUBLISHABLE_KEY)
 
@@ -23,6 +25,10 @@ interface Quest {
   photoUrl: string | null
   note: string
   liked: boolean | null
+  placeName?: string
+  placeAddress?: string
+  placeTypes?: string[]
+  identification?: string
   justUnlocked: boolean
   justSolved: boolean
 }
@@ -59,6 +65,9 @@ const CITIES: Record<string, string[]> = {
   Turkey: ['Istanbul', 'Ankara', 'Izmir', 'Bursa', 'Antalya'],
   'United Kingdom': ['London', 'Edinburgh', 'Oxford', 'Bath', 'York', 'Bristol'],
 }
+
+const MAX_CASES_PER_CATEGORY = 10
+const MAX_CASES_PER_DOSSIER = 20
 
 const INTEREST_META: { id: Interest; label: string; code: string }[] = [
   { id: 'Landmarks',    label: 'Landmarks',   code: 'I'   },
@@ -129,12 +138,66 @@ const QUEST_TEMPLATES: Record<Interest, { title: string; hints: string[] }> = {
   },
 }
 
-function buildQuests(interests: Interest[]): Quest[] {
-  return interests.map((interest, i) => ({
+function buildQuests(interests: Interest[], counts?: Record<Interest, number>): Quest[] {
+  const list: Quest[] = []
+  for (const interest of interests) {
+    const n = Math.max(1, counts?.[interest] ?? 1)
+    for (let copy = 0; copy < n; copy += 1) {
+      list.push({
+        id: `q${list.length}`,
+        category: interest,
+        title: n > 1 ? `${QUEST_TEMPLATES[interest].title} — ${copy + 1}` : QUEST_TEMPLATES[interest].title,
+        hints: QUEST_TEMPLATES[interest].hints,
+        unlockedHints: 1,
+        solved: false,
+        photoUrl: null,
+        note: '',
+        liked: null,
+        justUnlocked: false,
+        justSolved: false,
+      })
+    }
+  }
+  return list.slice(0, MAX_CASES_PER_DOSSIER)
+}
+
+async function buildQuestsFromApi(
+  country: string,
+  city: string,
+  interests: Interest[],
+  priorCases: PriorCase[],
+  counts: Record<Interest, number>,
+): Promise<Quest[]> {
+  const response = await fetch('/api/generate-quests', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ country, city, interests, counts, priorCases }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Quest generation failed: ${response.status}`)
+  }
+
+  const data = await response.json()
+
+  return data.quests.map((q: {
+    category: Interest
+    title?: string
+    place_name?: string
+    place_address?: string
+    place_types?: string[]
+    clue?: string
+    default_hint?: string
+    bonus_hint?: string
+    hints?: string[]
+  }, i: number) => ({
     id: `q${i}`,
-    category: interest,
-    title: QUEST_TEMPLATES[interest].title,
-    hints: QUEST_TEMPLATES[interest].hints,
+    category: q.category as Interest,
+    title: q.title || 'The File Without a Cover',
+    placeName: q.place_name,
+    placeAddress: q.place_address,
+    placeTypes: q.place_types,
+    hints: q.hints?.length === 3 ? q.hints : [q.clue || '', q.default_hint || '', q.bonus_hint || ''],
     unlockedHints: 1,
     solved: false,
     photoUrl: null,
@@ -238,7 +301,7 @@ function NavBar({
         role="button"
         tabIndex={0}
         onKeyDown={e => e.key === 'Enter' && onNavigate('route')}
-        aria-label="MotME Home"
+        aria-label="Mystery of the Midnight Express home"
       >
         <span style={{ fontSize: 11, color: 'var(--gold-dim)', fontFamily: 'Courier Prime, monospace', letterSpacing: '0.14em' }}>✦</span>
         <span style={{ fontSize: 15, fontWeight: 600 }}>MotME</span>
@@ -267,66 +330,19 @@ function NavBar({
           </div>
         )}
         <NavTab active={page === 'account'} onClick={() => onNavigate('account')}>Account</NavTab>
-        {CLERK_ENABLED && <ClerkAuthControls />}
+        {CLERK_ENABLED && (
+          <div className="flex items-center ml-1">
+            <UserButton
+              appearance={{
+                elements: {
+                  avatarBox: { width: 28, height: 28 },
+                },
+              }}
+            />
+          </div>
+        )}
       </div>
     </nav>
-  )
-}
-
-function AuthTextButton({ children }: { children: React.ReactNode }) {
-  return (
-    <span
-      className="font-type px-3 py-1 text-xs"
-      style={{
-        letterSpacing: '0.08em',
-        color: 'rgba(200,180,140,0.7)',
-        fontSize: 10,
-        cursor: 'pointer',
-        textTransform: 'uppercase',
-      }}
-    >
-      {children}
-    </span>
-  )
-}
-
-function ClerkAuthControls() {
-  return (
-    <div className="flex items-center gap-1 ml-1">
-      <SignedOut>
-        <SignInButton mode="modal">
-          <button type="button" style={{ background: 'none', border: 'none', padding: 0 }}>
-            <AuthTextButton>Sign In</AuthTextButton>
-          </button>
-        </SignInButton>
-        <SignUpButton mode="modal">
-          <button
-            type="button"
-            className="font-type px-3 py-1 text-xs"
-            style={{
-              letterSpacing: '0.08em',
-              color: 'var(--navy)',
-              background: 'var(--gold-light)',
-              border: 'none',
-              fontSize: 10,
-              cursor: 'pointer',
-              textTransform: 'uppercase',
-            }}
-          >
-            Sign Up
-          </button>
-        </SignUpButton>
-      </SignedOut>
-      <SignedIn>
-        <UserButton
-          appearance={{
-            elements: {
-              avatarBox: { width: 28, height: 28 },
-            },
-          }}
-        />
-      </SignedIn>
-    </div>
   )
 }
 
@@ -356,7 +372,7 @@ function NavTab({ active, onClick, children }: { active: boolean; onClick: () =>
    PAGE 1 — CHOOSE YOUR ROUTE
 ═══════════════════════════════════════════════════════════ */
 
-function RoutePage({ onBegin }: { onBegin: (country: string, city: string, interests: Interest[]) => void }) {
+function RoutePage({ onBegin }: { onBegin: (country: string, city: string, interests: Interest[], counts: Record<Interest, number>) => void }) {
   const [country, setCountry] = useState('')
   const [countrySearch, setCountrySearch] = useState('')
   const [countryOpen, setCountryOpen] = useState(false)
@@ -364,6 +380,7 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
   const [cityConfirmed, setCityConfirmed] = useState(false)
   const [citySuggestionsVisible, setCitySuggestionsVisible] = useState(false)
   const [interests, setInterests] = useState<Set<Interest>>(new Set())
+  const [counts, setCounts] = useState<Partial<Record<Interest, number>>>({})
   const countryRef = useRef<HTMLDivElement>(null)
   const cityRef = useRef<HTMLInputElement>(null)
 
@@ -399,16 +416,39 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
     setCitySuggestionsVisible(false)
   }
 
+  const selectedInterests = Array.from(interests)
+  const totalCases = selectedInterests.reduce((sum, id) => sum + (counts[id] || 1), 0)
+
   const toggleInterest = (id: Interest) => {
     setInterests(prev => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (next.has(id)) {
+        next.delete(id)
+        setCounts(current => {
+          const copy = { ...current }
+          delete copy[id]
+          return copy
+        })
+      } else {
+        next.add(id)
+        setCounts(current => {
+          const used = Array.from(next).reduce((sum, key) => sum + (key === id ? 0 : current[key] || 1), 0)
+          const room = Math.max(1, MAX_CASES_PER_DOSSIER - used)
+          const starter = next.size === 1 ? Math.min(3, room, MAX_CASES_PER_CATEGORY) : Math.min(1, room)
+          return { ...current, [id]: starter }
+        })
+      }
       return next
     })
   }
 
-  const canProceed = country && cityConfirmed && city.trim().length > 1 && interests.size > 0
+  const setCount = (id: Interest, nextValue: number) => {
+    const others = selectedInterests.filter(item => item !== id).reduce((sum, key) => sum + (counts[key] || 1), 0)
+    const maxForThis = Math.min(MAX_CASES_PER_CATEGORY, MAX_CASES_PER_DOSSIER - others)
+    setCounts(current => ({ ...current, [id]: Math.max(1, Math.min(maxForThis, nextValue)) }))
+  }
+
+  const canProceed = country && cityConfirmed && city.trim().length > 1 && interests.size > 0 && totalCases > 0 && totalCases <= MAX_CASES_PER_DOSSIER
 
   return (
     <div
@@ -430,7 +470,7 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
       <div className="relative z-10 flex items-center justify-center pt-10 pb-2" aria-hidden="true">
         <div className="flex items-center gap-3" style={{ color: 'var(--gold-dim)' }}>
           <div style={{ width: 60, height: 1, background: 'var(--gold-dim)' }} />
-          <span className="font-type" style={{ fontSize: 10, letterSpacing: '0.22em' }}>MIDNIGHT EXPRESS DETECTIVE AGENCY</span>
+          <span className="font-type" style={{ fontSize: 10, letterSpacing: '0.22em' }}>MYSTERY OF THE MIDNIGHT EXPRESS</span>
           <div style={{ width: 60, height: 1, background: 'var(--gold-dim)' }} />
         </div>
       </div>
@@ -617,11 +657,93 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
           </div>
         )}
 
+        {country && cityConfirmed && city.trim().length > 1 && selectedInterests.length > 0 && (
+          <div className="page-enter space-y-4">
+            <label className="font-type block" style={{ fontSize: 10, letterSpacing: '0.2em', color: 'var(--gold-dim)', textTransform: 'uppercase' }}>
+              Dossier depth — files per specialty
+            </label>
+            <p className="font-body" style={{ fontSize: 14, color: 'rgba(220,200,160,0.62)', lineHeight: 1.55 }}>
+              {selectedInterests.length === 1
+                ? 'A single field of inquiry may carry as many as ten files. The train will not take more than twenty.'
+                : 'Up to ten files in each specialty. Twenty files aboard this train, no more.'}
+            </p>
+            {selectedInterests.map(id => {
+              const meta = INTEREST_META.find(item => item.id === id)!
+              const value = counts[id] || 1
+              const others = totalCases - value
+              const maxForThis = Math.min(MAX_CASES_PER_CATEGORY, MAX_CASES_PER_DOSSIER - others)
+              return (
+                <div
+                  key={id}
+                  className="flex items-center justify-between gap-4 px-4 py-3"
+                  style={{ background: 'rgba(20,22,40,0.72)', border: '1px solid rgba(160,126,20,0.28)' }}
+                >
+                  <div>
+                    <div className="font-type" style={{ fontSize: 11, letterSpacing: '0.14em', color: 'var(--gold-light)', textTransform: 'uppercase' }}>
+                      {meta.label}
+                    </div>
+                    <div className="font-type" style={{ fontSize: 9, letterSpacing: '0.1em', color: 'rgba(200,180,140,0.4)' }}>
+                      {value} {value === 1 ? 'file' : 'files'}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setCount(id, value - 1)}
+                      disabled={value <= 1}
+                      className="font-type"
+                      style={{
+                        width: 32,
+                        height: 32,
+                        background: 'transparent',
+                        border: '1px solid rgba(160,126,20,0.35)',
+                        color: value <= 1 ? 'rgba(160,140,100,0.3)' : 'var(--gold-light)',
+                        cursor: value <= 1 ? 'not-allowed' : 'pointer',
+                      }}
+                      aria-label={`Fewer ${meta.label} files`}
+                    >
+                      −
+                    </button>
+                    <span className="font-display" style={{ minWidth: 28, textAlign: 'center', color: 'var(--cream)', fontSize: 20 }}>
+                      {value}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setCount(id, value + 1)}
+                      disabled={value >= maxForThis}
+                      className="font-type"
+                      style={{
+                        width: 32,
+                        height: 32,
+                        background: 'transparent',
+                        border: '1px solid rgba(160,126,20,0.35)',
+                        color: value >= maxForThis ? 'rgba(160,140,100,0.3)' : 'var(--gold-light)',
+                        cursor: value >= maxForThis ? 'not-allowed' : 'pointer',
+                      }}
+                      aria-label={`More ${meta.label} files`}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+            <div className="font-type" style={{ fontSize: 10, letterSpacing: '0.14em', color: totalCases >= MAX_CASES_PER_DOSSIER ? 'var(--burgundy-light)' : 'var(--gold-dim)', textTransform: 'uppercase' }}>
+              {totalCases} of {MAX_CASES_PER_DOSSIER} files boarded
+            </div>
+          </div>
+        )}
+
         {/* CTA */}
         {canProceed && (
           <div className="flex justify-center pt-2 page-enter">
             <button
-              onClick={() => onBegin(country, city, Array.from(interests))}
+              onClick={() => onBegin(
+                country,
+                city,
+                selectedInterests,
+                Object.fromEntries(selectedInterests.map(id => [id, counts[id] || 1])) as Record<Interest, number>,
+              )}
               className="ticket-btn font-type px-10 py-4 text-sm transition-all hover:brightness-110 active:scale-95"
               style={{
                 background: 'var(--burgundy)',
@@ -671,8 +793,11 @@ function CasesPage({
 }) {
   const [activeModal, setActiveModal] = useState<string | null>(null)
   const [modalPhoto, setModalPhoto] = useState<string | null>(null)
+  const [modalGuess, setModalGuess] = useState('')
   const [modalNote, setModalNote] = useState('')
   const [modalLiked, setModalLiked] = useState<boolean | null>(null)
+  const [modalError, setModalError] = useState<string | null>(null)
+  const [sealing, setSealing] = useState(false)
   const [telegram, setTelegram] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -681,43 +806,94 @@ function CasesPage({
   const openModal = (q: Quest) => {
     setActiveModal(q.id)
     setModalPhoto(q.photoUrl)
+    setModalGuess(q.identification || '')
     setModalNote(q.note)
     setModalLiked(q.liked)
+    setModalError(null)
+    setSealing(false)
   }
 
   const closeModal = () => {
     setActiveModal(null)
     setModalPhoto(null)
+    setModalGuess('')
     setModalNote('')
     setModalLiked(null)
+    setModalError(null)
+    setSealing(false)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  const handleSealCase = () => {
-    if (!activeModal) return
-    const q = quests.find(q => q.id === activeModal)
+  const handleSealCase = async () => {
+    if (!activeModal || sealing) return
+    const q = quests.find(item => item.id === activeModal)
     if (!q) return
 
+    const guess = modalGuess.trim()
+    if (guess.length < 3) {
+      setModalError('The clerk needs a name, a place, or a description that a local would recognize.')
+      return
+    }
+
+    setSealing(true)
+    setModalError(null)
+
+    const secret = secretForQuest(city, country, q)
+    let matched = guessMatchesPlace(guess, secret.placeName, secret.placeAddress)
+    if (!matched) {
+      try {
+        const response = await fetch('/api/verify-guess', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            guess,
+            placeName: secret.placeName,
+            placeAddress: secret.placeAddress,
+            city,
+            country,
+            title: q.title,
+            hints: q.hints,
+          }),
+        })
+        const data = await response.json() as { match?: boolean; reason?: string; error?: string }
+        if (!response.ok) throw new Error(data.error || 'The wire went dead.')
+        matched = Boolean(data.match)
+        if (!matched) {
+          setModalError(data.reason || 'The ledgers do not agree. Look again, or name it more plainly.')
+          setSealing(false)
+          return
+        }
+      } catch {
+        setModalError('The night clerk cannot reach the central ledger. Try the proper name once more.')
+        setSealing(false)
+        return
+      }
+    }
+
+    const keysEarned = 1 + (modalPhoto ? 1 : 0)
     onUpdateQuest(activeModal, {
       solved: true,
       photoUrl: modalPhoto,
       note: modalNote,
       liked: modalLiked,
+      identification: guess,
+      placeName: secret.placeName || q.placeName,
+      placeAddress: secret.placeAddress || q.placeAddress,
       justSolved: true,
     })
+    onEarnKeys(keysEarned)
 
-    // Award 2 keys for solving with a photo
-    const keysEarned = modalPhoto ? 2 : 0
-    if (keysEarned > 0) onEarnKeys(keysEarned)
-
-    const msg = keysEarned > 0
-      ? `Case sealed. 2 keys recovered — spend them to unlock classified leads on any open file.`
-      : 'Case sealed. Your evidence is on record.'
+    const trailNote = modalLiked === false
+      ? ' That trail is struck from the next briefing.'
+      : modalLiked === true
+        ? ' The clerk will look for more of that kind.'
+        : ''
+    const msg = (modalPhoto
+      ? 'The name and the plate are on file. Two keys recovered — each opens one classified lead on an open file.'
+      : 'The name is on the ledger. One key recovered — spend it to open a classified lead on another file.') + trailNote
     setTelegram(msg)
-    setTimeout(() => setTelegram(null), 4200)
+    setTimeout(() => setTelegram(null), 4800)
     closeModal()
-
-    // Clear justSolved after stamp animation
     setTimeout(() => onUpdateQuest(activeModal, { justSolved: false }), 1200)
   }
 
@@ -872,7 +1048,7 @@ function CasesPage({
             {/* Modal header */}
             <div className="px-6 pt-5 pb-4" style={{ borderBottom: '1px solid rgba(160,126,20,0.18)' }}>
               <div className="font-type text-xs mb-1" style={{ letterSpacing: '0.15em', color: 'var(--gold-dim)', textTransform: 'uppercase' }}>
-                Evidence Filing
+                Name the Mark
               </div>
               <div className="font-display text-base" style={{ color: 'var(--cream)', fontWeight: 600 }}>
                 {activeQuest.title}
@@ -880,10 +1056,42 @@ function CasesPage({
             </div>
 
             <div className="px-6 pt-5 pb-6 space-y-5">
+              <div>
+                <label className="font-type block mb-2" style={{ fontSize: 10, letterSpacing: '0.15em', color: 'var(--gold-dim)', textTransform: 'uppercase' }}>
+                  Identification <span style={{ color: 'var(--burgundy-light)' }}>— required</span>
+                </label>
+                <textarea
+                  value={modalGuess}
+                  onChange={e => { setModalGuess(e.target.value); setModalError(null) }}
+                  placeholder="The proper name, a description a local would recognize, or both."
+                  rows={3}
+                  className="w-full font-type text-sm resize-none"
+                  style={{
+                    background: 'rgba(11,13,28,0.7)',
+                    border: `1px solid ${modalError ? 'rgba(180,70,70,0.55)' : 'rgba(160,126,20,0.25)'}`,
+                    color: 'var(--cream)',
+                    padding: '10px 12px',
+                    letterSpacing: '0.04em',
+                    lineHeight: 1.6,
+                    outline: 'none',
+                    fontFamily: 'Courier Prime, monospace',
+                    fontSize: 12,
+                  }}
+                />
+                <p className="font-type mt-2" style={{ fontSize: 10, color: 'rgba(200,180,140,0.45)', letterSpacing: '0.04em', lineHeight: 1.5 }}>
+                  A correct identification recovers one classified lead. A field plate recovers a second.
+                </p>
+                {modalError && (
+                  <p className="font-body mt-2" style={{ fontSize: 13, color: 'var(--burgundy-light)', fontStyle: 'italic', lineHeight: 1.5 }}>
+                    {modalError}
+                  </p>
+                )}
+              </div>
+
               {/* Photo upload */}
               <div>
                 <label className="font-type block mb-2" style={{ fontSize: 10, letterSpacing: '0.15em', color: 'var(--gold-dim)', textTransform: 'uppercase' }}>
-                  Field Photograph
+                  Field Photograph <span style={{ opacity: 0.5 }}>(optional — extra lead)</span>
                 </label>
                 <div
                   className="relative flex items-center justify-center cursor-pointer transition-all hover:brightness-110"
@@ -904,7 +1112,7 @@ function CasesPage({
                   ) : (
                     <div className="flex flex-col items-center gap-2" style={{ color: 'rgba(160,126,20,0.5)' }}>
                       <CameraIcon size={24} />
-                      <span className="font-type text-xs" style={{ letterSpacing: '0.1em', textTransform: 'uppercase' }}>File the Evidence</span>
+                      <span className="font-type text-xs" style={{ letterSpacing: '0.1em', textTransform: 'uppercase' }}>File a Plate — Optional</span>
                     </div>
                   )}
                   <input
@@ -977,9 +1185,12 @@ function CasesPage({
                     }}
                     aria-pressed={modalLiked === false}
                   >
-                    ○ Noted
+                    ○ Not the Trail
                   </button>
                 </div>
+                <p className="font-type mt-2" style={{ fontSize: 10, color: 'rgba(200,180,140,0.4)', letterSpacing: '0.04em', lineHeight: 1.5 }}>
+                  A pass teaches the clerk what not to send again.
+                </p>
               </div>
 
               {/* Actions */}
@@ -999,7 +1210,8 @@ function CasesPage({
                   Stand Down
                 </button>
                 <button
-                  onClick={handleSealCase}
+                  onClick={() => void handleSealCase()}
+                  disabled={sealing || modalGuess.trim().length < 3}
                   className="ticket-btn flex-1 font-type text-xs py-2.5 px-6 transition-all hover:brightness-110 active:scale-95"
                   style={{
                     background: 'var(--burgundy)',
@@ -1007,11 +1219,12 @@ function CasesPage({
                     letterSpacing: '0.14em',
                     textTransform: 'uppercase',
                     border: 'none',
-                    cursor: 'pointer',
+                    cursor: sealing || modalGuess.trim().length < 3 ? 'not-allowed' : 'pointer',
+                    opacity: sealing || modalGuess.trim().length < 3 ? 0.55 : 1,
                     boxShadow: '0 0 20px rgba(124,27,44,0.4)',
                   }}
                 >
-                  Seal the Case
+                  {sealing ? 'Consulting the Ledger…' : 'Seal the Case'}
                 </button>
               </div>
             </div>
@@ -1165,12 +1378,18 @@ function QuestCard({ quest, keys, onOpen, onSpendKey }: { quest: Quest; keys: nu
                 cursor: 'pointer',
               }}
             >
-              I Found It — File Evidence
+              I Found It — Name the Mark
             </button>
           )}
 
+          {quest.solved && (quest.placeName || quest.identification) && (
+            <p className="font-type mt-4" style={{ fontSize: 11, color: 'var(--ink-mid)', letterSpacing: '0.03em', lineHeight: 1.5, borderTop: '1px dashed rgba(80,55,20,0.25)', paddingTop: 8 }}>
+              Identified: {quest.placeName || quest.identification}
+            </p>
+          )}
+
           {quest.solved && quest.note && (
-            <p className="font-type mt-4" style={{ fontSize: 10.5, color: 'var(--ink-faded)', fontStyle: 'italic', lineHeight: 1.6, borderTop: '1px dashed rgba(80,55,20,0.25)', paddingTop: 8 }}>
+            <p className="font-type mt-2" style={{ fontSize: 10.5, color: 'var(--ink-faded)', fontStyle: 'italic', lineHeight: 1.6 }}>
               "{quest.note}"
             </p>
           )}
@@ -1189,12 +1408,17 @@ function toStoredQuests(items: Quest[]): StoredQuest[] {
 }
 
 function fromStoredTrip(trip: StoredTrip): Quest[] {
-  return trip.quests.map(quest => ({
-    ...quest,
-    category: quest.category as Interest,
-    justUnlocked: false,
-    justSolved: false,
-  }))
+  return trip.quests.map(quest => {
+    const secret = secretForQuest(trip.city, trip.country, quest)
+    return {
+      ...quest,
+      category: quest.category as Interest,
+      placeName: secret.placeName,
+      placeAddress: secret.placeAddress,
+      justUnlocked: false,
+      justSolved: false,
+    }
+  })
 }
 
 export default function App() {
@@ -1203,9 +1427,11 @@ export default function App() {
 }
 
 function ClerkBackedApp() {
-  const { isLoaded } = useUser()
+  const { isLoaded, isSignedIn } = useUser()
   const { getToken } = useAuth()
-  return <AppShell getToken={getToken} clerkReady={isLoaded} />
+  if (!isLoaded) return <AuthGateSplash />
+  if (!isSignedIn) return <IntroPage />
+  return <AppShell getToken={getToken} clerkReady />
 }
 
 function AppShell({
@@ -1261,24 +1487,68 @@ function AppShell({
     void getToken().then(token => persistTrip(token, trip))
   }, [city, country, getToken, keys, quests])
 
-  const handleBegin = useCallback((c: string, ct: string, interests: Interest[]) => {
-    const nextQuests = buildQuests(interests)
+  const [generating, setGenerating] = useState(false)
+
+  const handleBegin = useCallback(async (c: string, ct: string, interests: Interest[], counts: Record<Interest, number>) => {
     setCountry(c)
     setCity(ct)
-    setQuests(nextQuests)
     setKeys(0)
+    setGenerating(true)
+
+    const priorCases = collectPriorCases(savedTrips)
+    let nextQuests: Quest[]
+    try {
+      nextQuests = await buildQuestsFromApi(c, ct, interests, priorCases, counts)
+      if (nextQuests.length === 0) throw new Error('No quests returned')
+    } catch (err) {
+      console.error('Falling back to static quest templates:', err)
+      nextQuests = buildQuests(interests, counts)
+    }
+
+    upsertDossierCases(nextQuests.map(quest => ({
+      city: ct,
+      country: c,
+      category: quest.category,
+      title: quest.title,
+      placeName: quest.placeName,
+      placeAddress: quest.placeAddress,
+      placeTypes: quest.placeTypes,
+      liked: quest.liked,
+      note: quest.note,
+    })))
+
+    setGenerating(false)
+    setQuests(nextQuests)
     setPage('cases')
+
     const trip: StoredTrip = { country: c, city: ct, keys: 0, quests: toStoredQuests(nextQuests) }
     setSavedTrips(prev => {
       const next = prev.filter(item => !(item.country === c && item.city === ct))
       return [trip, ...next]
     })
     void getToken().then(token => persistTrip(token, trip))
-  }, [getToken])
+  }, [getToken, savedTrips])
 
   const handleUpdateQuest = useCallback((id: string, update: Partial<Quest>) => {
-    setQuests(prev => prev.map(q => q.id === id ? { ...q, ...update } : q))
-  }, [])
+    setQuests(prev => {
+      const next = prev.map(q => q.id === id ? { ...q, ...update } : q)
+      const sealed = next.find(q => q.id === id)
+      if (sealed && (update.solved || update.liked !== undefined || update.note !== undefined)) {
+        upsertDossierCases([{
+          city,
+          country,
+          category: sealed.category,
+          title: sealed.title,
+          placeName: sealed.placeName,
+          placeAddress: sealed.placeAddress,
+          placeTypes: sealed.placeTypes,
+          liked: sealed.liked,
+          note: sealed.note,
+        }])
+      }
+      return next
+    })
+  }, [city, country])
 
   const handleEarnKeys = useCallback((n: number) => {
     setKeys(k => k + n)
@@ -1313,6 +1583,26 @@ function AppShell({
         questsSolved={solvedCount}
         onNavigate={navigate}
       />
+      {generating && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(11,13,28,0.94)' }}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="text-center px-6">
+            <div className="font-type mb-2" style={{ fontSize: 11, letterSpacing: '0.2em', color: 'var(--gold-dim)', textTransform: 'uppercase' }}>
+              Dispatching Field Agents
+            </div>
+            <div className="font-display" style={{ fontSize: 18, color: 'var(--gold-light)', fontStyle: 'italic' }}>
+              The night clerk is opening the {city} files...
+            </div>
+            <p className="font-body mt-3" style={{ fontSize: 14, color: 'rgba(220,200,160,0.6)', maxWidth: 360, margin: '0.75rem auto 0' }}>
+              Real streets. Real doors. The names stay in the vault until you find them.
+            </p>
+          </div>
+        </div>
+      )}
       {page === 'route' && <RoutePage onBegin={handleBegin} />}
       {page === 'cases' && (
         <CasesPage

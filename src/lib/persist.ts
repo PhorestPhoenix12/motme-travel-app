@@ -8,6 +8,22 @@ export type StoredQuest = {
   photoUrl: string | null
   note: string
   liked: boolean | null
+  placeName?: string
+  placeAddress?: string
+  placeTypes?: string[]
+  identification?: string
+}
+
+export type PriorCase = {
+  city: string
+  country: string
+  category: string
+  title: string
+  placeName?: string
+  placeAddress?: string
+  placeTypes?: string[]
+  liked: boolean | null
+  note: string
 }
 
 export type StoredTrip = {
@@ -27,6 +43,72 @@ export type StoredProfile = {
 }
 
 const TRIP_KEY = 'motme_trip'
+const DOSSIER_KEY = 'motme_dossier'
+
+function dossierKeyOf(item: PriorCase) {
+  return `${item.city}|${item.country}|${item.category}|${item.placeName || item.title}`.toLowerCase()
+}
+
+export function loadDossierCases(): PriorCase[] {
+  try {
+    const raw = localStorage.getItem(DOSSIER_KEY)
+    if (!raw) return []
+    const data = JSON.parse(raw) as { priorCases?: PriorCase[] }
+    return Array.isArray(data.priorCases) ? data.priorCases : []
+  } catch {
+    return []
+  }
+}
+
+export function upsertDossierCases(incoming: PriorCase[]) {
+  if (incoming.length === 0) return
+  const map = new Map(loadDossierCases().map(item => [dossierKeyOf(item), item]))
+  for (const item of incoming) {
+    const previous = map.get(dossierKeyOf(item))
+    map.set(dossierKeyOf(item), previous ? { ...previous, ...item } : item)
+  }
+  localStorage.setItem(DOSSIER_KEY, JSON.stringify({ priorCases: [...map.values()].slice(-80) }))
+}
+
+export function secretForQuest(city: string, country: string, quest: { title: string; category: string; placeName?: string; placeAddress?: string }) {
+  if (quest.placeName && quest.placeAddress) {
+    return { placeName: quest.placeName, placeAddress: quest.placeAddress }
+  }
+  const match = loadDossierCases().find(item =>
+    item.title === quest.title &&
+    item.category === quest.category &&
+    item.city === city &&
+    item.country === country,
+  )
+  return {
+    placeName: quest.placeName || match?.placeName,
+    placeAddress: quest.placeAddress,
+  }
+}
+
+export function collectPriorCases(trips: StoredTrip[]): PriorCase[] {
+  const fromTrips = trips.flatMap(trip =>
+    trip.quests
+      .filter(quest => quest.solved || quest.placeName)
+      .map(quest => ({
+        city: trip.city,
+        country: trip.country,
+        category: quest.category,
+        title: quest.title,
+        placeName: quest.placeName,
+        placeAddress: quest.placeAddress,
+        placeTypes: quest.placeTypes,
+        liked: quest.liked,
+        note: quest.note,
+      })),
+  )
+  const map = new Map(loadDossierCases().map(item => [dossierKeyOf(item), item]))
+  for (const item of fromTrips) {
+    const previous = map.get(dossierKeyOf(item))
+    map.set(dossierKeyOf(item), previous ? { ...previous, ...item } : item)
+  }
+  return [...map.values()]
+}
 
 export function loadTripLocal(): StoredTrip | null {
   try {
