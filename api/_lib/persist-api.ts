@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { and, desc, eq, notInArray } from 'drizzle-orm'
 import { verifyToken } from '@clerk/backend'
-import { clerkSecretKey, db } from '../../src/db/client'
-import { profiles, questRecords, trips } from '../../src/db/schema'
+import { clerkSecretKey, db } from './db'
+import { profiles, questRecords, trips } from './schema'
 import {
   albumPhotoKey,
   hasObjectStorage,

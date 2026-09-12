@@ -1,7 +1,7 @@
 import type { ServerResponse } from 'node:http'
 import { eq } from 'drizzle-orm'
-import { db } from '../../src/db/client'
-import { questRecords } from '../../src/db/schema'
+import { db } from './db'
+import { questRecords } from './schema'
 import { dataUrlToBuffer, getPhotoBytes, hasObjectStorage, isSafeAlbumKey } from './storage'
 
 function send(res: ServerResponse, status: number, body: unknown) {
