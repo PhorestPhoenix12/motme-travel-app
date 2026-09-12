@@ -1,9 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { handleDestinationsApi } from '../server/destinations'
-import { runNodeApi, withApiPath } from '../server/node-api'
 
 export const config = { maxDuration: 60 }
 
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
-  await runNodeApi(withApiPath(req, '/api/destinations'), res, handleDestinationsApi)
+  try {
+    const { handleDestinationsApi } = await import('../server/destinations')
+    await handleDestinationsApi(req, res)
+  } catch (error) {
+    if (res.headersSent) return
+    res.statusCode = 500
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Destinations API failed to load' }))
+  }
 }

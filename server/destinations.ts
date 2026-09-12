@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { countryByCode, countryByName } from '../src/data/countries'
+import gazetteerData from '../src/data/cities-by-country.json'
 
 const CITY_TYPES = new Set([
   'locality',
@@ -68,7 +69,11 @@ let gazetteer: Record<string, string[]> | null = null
 
 function loadGazetteer() {
   if (gazetteer) return gazetteer
-  const here = dirname(fileURLToPath(import.meta.url))
+  if (gazetteerData && typeof gazetteerData === 'object') {
+    gazetteer = gazetteerData as Record<string, string[]>
+    return gazetteer
+  }
+  const here = typeof import.meta.url === 'string' ? dirname(fileURLToPath(import.meta.url)) : process.cwd()
   const candidates = [
     resolve(process.cwd(), 'src/data/cities-by-country.json'),
     join(here, '../src/data/cities-by-country.json'),
@@ -373,39 +378,73 @@ Return JSON only: { "match": true, "city": "canonical English name", "reason": "
   }
 }
 
+function filterGazetteer(countryCode: string, query: string, limit = 40) {
+  const q = query.trim().toLowerCase()
+  const all = gazetteerSuggestions(countryCode)
+  if (!q) return all.slice(0, 400)
+  return all.filter(item => item.city.toLowerCase().includes(q)).slice(0, limit)
+}
+
+function mergeSuggestions(primary: CitySuggestion[], secondary: CitySuggestion[]) {
+  const seen = new Set(primary.map(item => item.city.toLowerCase()))
+  const merged = [...primary]
+  for (const item of secondary) {
+    const key = item.city.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(item)
+  }
+  return merged
+}
+
 function handleList(body: SuggestBody, res: ServerResponse) {
   const countryCode = (body.countryCode || '').trim().toUpperCase()
   if (!countryCode) {
     send(res, 400, { error: 'A country is required before the departure board can open.' })
     return
   }
-  send(res, 200, { suggestions: gazetteerSuggestions(countryCode) })
+  const suggestions = gazetteerSuggestions(countryCode)
+  send(res, 200, {
+    suggestions,
+    placesConfigured: Boolean(apiKeys().places),
+    geminiConfigured: Boolean(apiKeys().gemini),
+  })
 }
 
 async function handleSuggest(body: SuggestBody, res: ServerResponse) {
   const query = (body.query || '').trim()
   const countryCode = (body.countryCode || '').trim().toUpperCase()
+  const local = countryCode ? filterGazetteer(countryCode, query) : []
   if (query.length < MIN_QUERY) {
-    send(res, 200, { suggestions: countryCode ? gazetteerSuggestions(countryCode) : [] })
+    send(res, 200, { suggestions: local, placesConfigured: Boolean(apiKeys().places) })
     return
   }
 
   const { places } = apiKeys()
   if (!places) {
-    send(res, 500, { error: 'GOOGLE_PLACE_API_KEY is not on file.' })
+    send(res, 200, {
+      suggestions: local,
+      placesConfigured: false,
+      warning: 'GOOGLE_PLACE_API_KEY is not on file; the clerk is using the local gazetteer.',
+    })
     return
   }
 
   const cacheKey = `${countryCode}|${query.toLowerCase()}`
   const cached = cacheGet(cacheKey)
   if (cached) {
-    send(res, 200, { suggestions: cached, cached: true })
+    send(res, 200, { suggestions: mergeSuggestions(cached, local), cached: true, placesConfigured: true })
     return
   }
 
-  const suggestions = await placesAutocomplete(query, places, countryCode || undefined, body.sessionToken)
-  cacheSet(cacheKey, suggestions)
-  send(res, 200, { suggestions })
+  try {
+    const suggestions = await placesAutocomplete(query, places, countryCode || undefined, body.sessionToken)
+    cacheSet(cacheKey, suggestions)
+    send(res, 200, { suggestions: mergeSuggestions(suggestions, local), placesConfigured: true })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Places lookup failed'
+    send(res, 200, { suggestions: local, placesConfigured: true, warning: message })
+  }
 }
 
 async function handleResolve(body: SuggestBody, res: ServerResponse) {
@@ -492,10 +531,6 @@ async function handleResolve(body: SuggestBody, res: ServerResponse) {
     return
   }
 
-  if (!places) {
-    send(res, 500, { error: 'GOOGLE_PLACE_API_KEY is not on file.' })
-    return
-  }
   if (query.length < MIN_QUERY && !placeId) {
     send(res, 400, { error: 'Name the city more plainly.' })
     return
@@ -505,9 +540,6 @@ async function handleResolve(body: SuggestBody, res: ServerResponse) {
 }
 
 export async function handleDestinationsApi(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
-  const url = new URL(req.url || '/', 'http://localhost')
-  if (url.pathname !== '/api/destinations') return false
-
   if (req.method === 'OPTIONS') {
     send(res, 204, null)
     return true
@@ -537,5 +569,7 @@ export async function handleDestinationsApi(req: IncomingMessage, res: ServerRes
     const message = error instanceof Error ? error.message : 'The wire went dead.'
     send(res, 500, { error: message })
   }
+  return true
+}
   return true
 }

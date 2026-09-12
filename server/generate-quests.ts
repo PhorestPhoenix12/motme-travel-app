@@ -888,15 +888,13 @@ Return JSON only: { "match": true, "reason": "one short sentence" }`,
 
 export async function handleQuestApi(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   const url = new URL(req.url || '/', 'http://localhost')
-  if (url.pathname === '/api/verify-guess') return handleVerifyGuess(req, res)
-  if (url.pathname === '/api/generate-quests') return handleGenerateQuests(req, res)
-  return false
+  const path = url.pathname
+  if (path === '/api/verify-guess' || path === '/' || path === '') return handleVerifyGuess(req, res)
+  if (path === '/api/generate-quests') return handleGenerateQuests(req, res)
+  return handleVerifyGuess(req, res)
 }
 
 export async function handleGenerateQuests(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
-  const url = new URL(req.url || '/', 'http://localhost')
-  if (url.pathname !== '/api/generate-quests') return false
-
   if (req.method === 'OPTIONS') {
     send(res, 204, null)
     return true

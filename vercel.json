@@ -13,7 +13,7 @@
     },
     "api/destinations.ts": {
       "maxDuration": 60,
-      "includeFiles": "src/data/cities-by-country.json"
+      "includeFiles": "src/data/**"
     },
     "api/generate-quests.ts": {
       "maxDuration": 60

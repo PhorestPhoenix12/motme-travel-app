@@ -34,8 +34,8 @@ export async function listCities(countryCode: string, signal?: AbortSignal): Pro
     signal,
     body: JSON.stringify({ action: 'list', countryCode }),
   })
-  if (!res.ok) return []
-  const data = (await res.json()) as { suggestions?: CitySuggestion[] }
+  const data = (await res.json().catch(() => ({}))) as { suggestions?: CitySuggestion[]; error?: string }
+  if (!res.ok) throw new Error(data.error || `The departure board failed (${res.status}).`)
   return Array.isArray(data.suggestions) ? data.suggestions : []
 }
 
@@ -58,8 +58,8 @@ export async function suggestCities(params: {
       sessionToken: params.sessionToken,
     }),
   })
-  if (!res.ok) return []
-  const data = (await res.json()) as { suggestions?: CitySuggestion[] }
+  const data = (await res.json().catch(() => ({}))) as { suggestions?: CitySuggestion[]; error?: string; warning?: string }
+  if (!res.ok) throw new Error(data.error || `City search failed (${res.status}).`)
   return Array.isArray(data.suggestions) ? data.suggestions : []
 }
 
