@@ -1,1 +1,1 @@
-export { profiles, questRecords, trips, usersTable } from '../../api/_lib/schema'
+export { placeCards, profiles, trips, usersTable, type TripCase } from '../../api/_lib/schema'

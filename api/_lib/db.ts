@@ -1,5 +1,15 @@
+import tls from 'node:tls'
 import { drizzle } from 'drizzle-orm/neon-http'
 import { loadDotEnv } from './env'
+
+try {
+  tls.setDefaultCACertificates([
+    ...tls.getCACertificates(),
+    ...tls.getCACertificates('system'),
+  ])
+} catch {
+  // Older Node builds without bundled+system CA merge still proceed.
+}
 
 type AppDb = ReturnType<typeof drizzle>
 

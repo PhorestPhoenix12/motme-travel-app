@@ -5,7 +5,8 @@ import AlbumPage from './AlbumPage'
 import IntroPage, { AuthGateSplash, ClerkIntroPage } from './IntroPage'
 import { countryByName } from './data/countries'
 import { QUEST_VARIANTS } from './data/quest-variants'
-import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, mergeTripPhotos, persistTrip, secretForQuest, uploadQuestPhoto, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
+import { guessFitsCase } from './lib/identify'
+import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadProfileRemote, loadTripLocal, loadTripRemote, mergeTripPhotos, persistTrip, secretForQuest, uploadQuestPhoto, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
 import { createCitySession, listCities, resolveCity, searchCountries, suggestCities, type CitySuggestion } from './lib/destinations'
 
 /* ═══════════════════════════════════════════════════════════
@@ -25,9 +26,12 @@ interface Quest {
   photoUrl: string | null
   note: string
   liked: boolean | null
+  placeCardId?: string
   placeName?: string
   placeAddress?: string
   placeTypes?: string[]
+  placeType?: string
+  placeDescription?: string
   identification?: string
   justUnlocked: boolean
   justSolved: boolean
@@ -82,11 +86,12 @@ async function buildQuestsFromApi(
   interests: Interest[],
   priorCases: PriorCase[],
   counts: Record<Interest, number>,
+  preferences: Record<string, string[]> = {},
 ): Promise<Quest[]> {
   const response = await fetch('/api/generate-quests', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ country, city, interests, counts, priorCases }),
+    body: JSON.stringify({ country, city, interests, counts, priorCases, preferences }),
   })
 
   if (!response.ok) {
@@ -101,28 +106,39 @@ async function buildQuestsFromApi(
     title?: string
     place_name?: string
     place_address?: string
+    place_type?: string
     place_types?: string[]
+    description?: string
+    gemini_description?: string
     clue?: string
     default_hint?: string
     bonus_hint?: string
     hints?: string[]
+    place_card_id?: string
   }>).filter(q => {
-    const venue = (q.place_name || '').trim().toLowerCase()
+    const venue = (q.place_name || '').trim()
+    const address = (q.place_address || '').trim()
+    const type = (q.place_type || q.place_types?.[0] || '').trim()
+    const description = (q.description || q.gemini_description || '').trim()
+    if (!venue || venue.toLowerCase() === 'unknown place' || !address || !type || !description) return false
     const title = (q.title || '').trim().toLowerCase()
     const clue = (q.clue || q.hints?.[0] || '').trim().toLowerCase()
-    const key = venue || `${title}|${clue}`
+    const key = venue.toLowerCase() || `${title}|${clue}`
     if (!key || seen.has(key)) return false
     if (title && seen.has(`title:${title}`)) return false
     seen.add(key)
     if (title) seen.add(`title:${title}`)
     return true
   }).map((q, i) => ({
-    id: `q${i}`,
+    id: q.place_card_id || `q${i}`,
     category: q.category as Interest,
     title: q.title || 'The File Without a Cover',
+    placeCardId: q.place_card_id,
     placeName: q.place_name,
     placeAddress: q.place_address,
+    placeType: q.place_type || q.place_types?.[0],
     placeTypes: q.place_types,
+    placeDescription: q.description || q.gemini_description,
     hints: q.hints?.length === 3 ? q.hints : [q.clue || '', q.default_hint || '', q.bonus_hint || ''],
     unlockedHints: 1,
     solved: false,
@@ -312,7 +328,7 @@ function GooglePlacesMark() {
   )
 }
 
-function RoutePage({ onBegin }: { onBegin: (country: string, city: string, interests: Interest[], counts: Record<Interest, number>) => void }) {
+function RoutePage({ onBegin, briefingError }: { onBegin: (country: string, city: string, interests: Interest[], counts: Record<Interest, number>) => void; briefingError?: string }) {
   const [country, setCountry] = useState('')
   const [countryCode, setCountryCode] = useState('')
   const [countrySearch, setCountrySearch] = useState('')
@@ -853,6 +869,11 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
             </button>
           </div>
         )}
+        {briefingError && (
+          <p className="font-type text-center pt-3" style={{ fontSize: 12, color: 'var(--burgundy-light)', letterSpacing: '0.04em', lineHeight: 1.5 }}>
+            {briefingError}
+          </p>
+        )}
       </div>
 
       {/* Bottom decorative rule */}
@@ -946,6 +967,30 @@ function CasesPage({
     setModalError(null)
 
     const secret = secretForQuest(city, country, q)
+    const location = {
+      placeName: secret.placeName || q.placeName,
+      placeAddress: secret.placeAddress || q.placeAddress,
+      placeType: secret.placeType || q.placeType,
+      placeTypes: secret.placeTypes || q.placeTypes,
+      placeDescription: secret.placeDescription || q.placeDescription,
+    }
+
+    if (!location.placeName) {
+      setModalError('This file has no location on the ledger. The clerk cannot drop the wax.')
+      setSealing(false)
+      return
+    }
+
+    if (!guessFitsCase(guess, {
+      placeName: location.placeName,
+      address: location.placeAddress,
+      title: q.title,
+      hints: q.hints,
+    })) {
+      setModalError('That name does not match the mark on this file. Try the place itself, not a neighboring door.')
+      setSealing(false)
+      return
+    }
 
     const keysEarned = 1 + (filedPhoto ? 1 : 0)
     onUpdateQuest(activeModal, {
@@ -954,8 +999,11 @@ function CasesPage({
       note: modalNote,
       liked: modalLiked,
       identification: guess,
-      placeName: secret.placeName || q.placeName,
-      placeAddress: secret.placeAddress || q.placeAddress,
+      placeName: location.placeName,
+      placeAddress: location.placeAddress,
+      placeType: location.placeType,
+      placeTypes: location.placeTypes,
+      placeDescription: location.placeDescription,
       justSolved: true,
     })
     onEarnKeys(keysEarned)
@@ -1482,10 +1530,23 @@ function QuestCard({ quest, keys, onOpen, onSpendKey }: { quest: Quest; keys: nu
             </button>
           )}
 
-          {quest.solved && (quest.placeName || quest.identification) && (
-            <p className="font-type mt-4" style={{ fontSize: 11, color: 'var(--ink-mid)', letterSpacing: '0.03em', lineHeight: 1.5, borderTop: '1px dashed rgba(80,55,20,0.25)', paddingTop: 8 }}>
-              Identified: {quest.placeName || quest.identification}
-            </p>
+          {quest.solved && quest.placeName && (
+            <div className="font-type mt-4" style={{ fontSize: 11, color: 'var(--ink-mid)', letterSpacing: '0.03em', lineHeight: 1.55, borderTop: '1px dashed rgba(80,55,20,0.25)', paddingTop: 8 }}>
+              <div style={{ fontSize: 9, letterSpacing: '0.16em', textTransform: 'uppercase', color: 'var(--gold-dim)', marginBottom: 4 }}>
+                Location on file
+              </div>
+              <div style={{ fontWeight: 600, color: 'var(--ink)' }}>{quest.placeName}</div>
+              <div>
+                {quest.placeType || ''}
+                {quest.placeType && quest.placeAddress ? ' · ' : ''}
+                {quest.placeAddress || ''}
+              </div>
+              {quest.placeDescription && (
+                <p className="mt-2" style={{ fontSize: 10.5, color: 'var(--ink-faded)', lineHeight: 1.55 }}>
+                  {quest.placeDescription}
+                </p>
+              )}
+            </div>
           )}
 
           {quest.solved && quest.note && (
@@ -1575,8 +1636,11 @@ function fromStoredTrip(trip: StoredTrip): Quest[] {
     return refreshTemplateQuest({
       ...quest,
       category: quest.category as Interest,
-      placeName: secret.placeName,
-      placeAddress: secret.placeAddress,
+      placeName: secret.placeName || quest.placeName,
+      placeAddress: secret.placeAddress || quest.placeAddress,
+      placeType: secret.placeType || quest.placeType,
+      placeTypes: quest.placeTypes || secret.placeTypes,
+      placeDescription: secret.placeDescription || quest.placeDescription,
       justUnlocked: false,
       justSolved: false,
     }, trip.city)
@@ -1661,21 +1725,27 @@ function AppShell({
   }, [city, country, getToken, keys, quests])
 
   const [generating, setGenerating] = useState(false)
+  const [briefingError, setBriefingError] = useState('')
 
   const handleBegin = useCallback(async (c: string, ct: string, interests: Interest[], counts: Record<Interest, number>) => {
     setCountry(c)
     setCity(ct)
     setKeys(0)
     setGenerating(true)
+    setBriefingError('')
 
     const priorCases = collectPriorCases(savedTrips)
+    const token = await getToken()
+    const profile = await loadProfileRemote(token)
     let nextQuests: Quest[]
     try {
-      nextQuests = await buildQuestsFromApi(c, ct, interests, priorCases, counts)
+      nextQuests = await buildQuestsFromApi(c, ct, interests, priorCases, counts, profile?.interests || {})
       if (nextQuests.length === 0) throw new Error('No quests returned')
     } catch (err) {
-      console.error('Falling back to static quest templates:', err)
-      nextQuests = buildQuests(interests, counts, ct)
+      console.error('Complete dossier briefing failed:', err)
+      setGenerating(false)
+      setBriefingError('The field office could not seal complete files for that city — every case needs a named place, address, type, and description. Try another specialty or city.')
+      return
     }
 
     upsertDossierCases(nextQuests.map(quest => ({
@@ -1685,7 +1755,9 @@ function AppShell({
       title: quest.title,
       placeName: quest.placeName,
       placeAddress: quest.placeAddress,
+      placeType: quest.placeType,
       placeTypes: quest.placeTypes,
+      placeDescription: quest.placeDescription,
       liked: quest.liked,
       note: quest.note,
     })))
@@ -1714,7 +1786,9 @@ function AppShell({
           title: sealed.title,
           placeName: sealed.placeName,
           placeAddress: sealed.placeAddress,
+          placeType: sealed.placeType,
           placeTypes: sealed.placeTypes,
+          placeDescription: sealed.placeDescription,
           liked: sealed.liked,
           note: sealed.note,
         }])
@@ -1777,7 +1851,7 @@ function AppShell({
           </div>
         </div>
       )}
-      {page === 'route' && <RoutePage onBegin={handleBegin} />}
+      {page === 'route' && <RoutePage onBegin={handleBegin} briefingError={briefingError} />}
       {page === 'cases' && (
         <CasesPage
           quests={quests}

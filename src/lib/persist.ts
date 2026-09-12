@@ -8,9 +8,12 @@ export type StoredQuest = {
   photoUrl: string | null
   note: string
   liked: boolean | null
+  placeCardId?: string
   placeName?: string
   placeAddress?: string
   placeTypes?: string[]
+  placeType?: string
+  placeDescription?: string
   identification?: string
 }
 
@@ -21,7 +24,9 @@ export type PriorCase = {
   title: string
   placeName?: string
   placeAddress?: string
+  placeType?: string
   placeTypes?: string[]
+  placeDescription?: string
   liked: boolean | null
   note: string
 }
@@ -70,10 +75,15 @@ export function upsertDossierCases(incoming: PriorCase[]) {
   localStorage.setItem(DOSSIER_KEY, JSON.stringify({ priorCases: [...map.values()].slice(-80) }))
 }
 
-export function secretForQuest(city: string, country: string, quest: { title: string; category: string; placeName?: string; placeAddress?: string }) {
-  if (quest.placeName && quest.placeAddress) {
-    return { placeName: quest.placeName, placeAddress: quest.placeAddress }
-  }
+export function secretForQuest(city: string, country: string, quest: {
+  title: string
+  category: string
+  placeName?: string
+  placeAddress?: string
+  placeType?: string
+  placeTypes?: string[]
+  placeDescription?: string
+}) {
   const match = loadDossierCases().find(item =>
     item.title === quest.title &&
     item.category === quest.category &&
@@ -82,7 +92,10 @@ export function secretForQuest(city: string, country: string, quest: { title: st
   )
   return {
     placeName: quest.placeName || match?.placeName,
-    placeAddress: quest.placeAddress,
+    placeAddress: quest.placeAddress || match?.placeAddress,
+    placeType: quest.placeType || match?.placeType,
+    placeTypes: quest.placeTypes || match?.placeTypes,
+    placeDescription: quest.placeDescription || match?.placeDescription,
   }
 }
 
@@ -97,7 +110,9 @@ export function collectPriorCases(trips: StoredTrip[]): PriorCase[] {
         title: quest.title,
         placeName: quest.placeName,
         placeAddress: quest.placeAddress,
+        placeType: quest.placeType,
         placeTypes: quest.placeTypes,
+        placeDescription: quest.placeDescription,
         liked: quest.liked,
         note: quest.note,
       })),

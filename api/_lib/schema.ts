@@ -1,4 +1,20 @@
-import { boolean, integer, jsonb, pgTable, text, timestamp, unique, uuid, varchar } from 'drizzle-orm/pg-core'
+import { doublePrecision, index, integer, jsonb, pgTable, text, timestamp, unique, uuid, varchar } from 'drizzle-orm/pg-core'
+
+/** Investigator marks on a place-card case. Case content lives on place_cards. */
+export type TripCase = {
+  id: string
+  placeCardId?: string | null
+  unlockedHints: number
+  solved: boolean
+  photoKey?: string | null
+  photoData?: string | null
+  note: string
+  liked: boolean | null
+  identification?: string | null
+  category?: string
+  title?: string
+  hints?: string[]
+}
 
 export const usersTable = pgTable('users', {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
@@ -26,28 +42,42 @@ export const trips = pgTable(
     country: text('country').notNull(),
     city: text('city').notNull(),
     keys: integer('keys').notNull().default(0),
+    cases: jsonb('cases').$type<TripCase[]>().notNull().default([]),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   table => [unique('trips_user_city').on(table.clerkUserId, table.country, table.city)],
 )
 
-export const questRecords = pgTable(
-  'quest_records',
+export const placeCards = pgTable(
+  'place_cards',
   {
     id: uuid('id').defaultRandom().primaryKey(),
-    tripId: uuid('trip_id')
-      .notNull()
-      .references(() => trips.id, { onDelete: 'cascade' }),
-    questKey: text('quest_key').notNull(),
+    googlePlaceId: text('google_place_id').notNull(),
+    googlePlaceName: text('google_place_name').notNull(),
+    address: text('address').notNull().default(''),
+    city: text('city').notNull(),
+    country: text('country').notNull(),
+    cityKey: text('city_key').notNull(),
+    countryKey: text('country_key').notNull(),
     category: text('category').notNull(),
+    placeTypes: jsonb('place_types').$type<string[]>().notNull().default([]),
+    primaryType: text('primary_type').notNull().default(''),
+    lat: doublePrecision('lat'),
+    lng: doublePrecision('lng'),
+    rating: doublePrecision('rating'),
+    ratingsCount: integer('ratings_count').notNull().default(0),
+    googleSummary: text('google_summary').notNull().default(''),
+    geminiDescription: text('gemini_description').notNull().default(''),
     title: text('title').notNull(),
-    hints: jsonb('hints').$type<string[]>().notNull(),
-    unlockedHints: integer('unlocked_hints').notNull().default(1),
-    solved: boolean('solved').notNull().default(false),
-    photoKey: text('photo_key'),
-    photoData: text('photo_data'),
-    note: text('note').notNull().default(''),
-    liked: boolean('liked'),
+    hint1: text('hint_1').notNull(),
+    hint2: text('hint_2').notNull(),
+    hint3: text('hint_3').notNull(),
+    identityFacts: jsonb('identity_facts').$type<string[]>().notNull().default([]),
+    sources: jsonb('sources').$type<Record<string, string>>().notNull().default({}),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
-  table => [unique('quest_records_trip_key').on(table.tripId, table.questKey)],
+  table => [
+    unique('place_cards_google_place_id').on(table.googlePlaceId),
+    index('place_cards_city_category_idx').on(table.cityKey, table.countryKey, table.category),
+  ],
 )

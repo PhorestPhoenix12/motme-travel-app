@@ -1,1 +1,1 @@
-export { handleGenerateQuests, handleQuestApi } from '../api/_lib/generate-quests'
+export { handleGenerateQuests, handleQuestApi, mintBaseCardsForCity, ensureBaseCards } from '../api/_lib/generate-quests'

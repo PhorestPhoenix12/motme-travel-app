@@ -29,11 +29,15 @@ export async function serveAlbumPhoto(key: string, res: ServerResponse) {
   }
 
   try {
-    const { eq } = await import('drizzle-orm')
+    const { sql } = await import('drizzle-orm')
     const { db } = await import('./db')
-    const { questRecords } = await import('./schema')
-    const rows = await db.select().from(questRecords).where(eq(questRecords.photoKey, key))
-    const inline = rows[0]?.photoData ? dataUrlToBuffer(rows[0].photoData) : null
+    const { trips } = await import('./schema')
+    const rows = await db
+      .select({ cases: trips.cases })
+      .from(trips)
+      .where(sql`${trips.cases} @> CAST(${JSON.stringify([{ photoKey: key }])} AS jsonb)`)
+    const photoData = rows.flatMap(row => row.cases || []).find(mark => mark.photoKey === key)?.photoData
+    const inline = photoData ? dataUrlToBuffer(photoData) : null
     if (inline) {
       res.statusCode = 200
       res.setHeader('Content-Type', inline.contentType)

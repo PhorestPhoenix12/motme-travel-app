@@ -2,6 +2,22 @@ import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import tls from 'node:tls'
+import { guessFitsCase } from '../../src/lib/identify'
+import {
+  cardsTooSimilar,
+  catalogToQuest,
+  hintCarriesIdentity,
+  identityFactsOf,
+  loadPlaceCards,
+  pickCatalogCards,
+  prefersHidden,
+  questHasPlaceFacts,
+  savePlaceCard,
+  withPlaceFacts,
+  type CatalogCard,
+  type PreferenceMap,
+} from './case-catalog'
+import { geocodeOsm, loadOsmPlaces, osmPlacesForInterest } from './osm-places'
 try {
   tls.setDefaultCACertificates([
     ...tls.getCACertificates(),
@@ -56,6 +72,7 @@ type GenerateRequest = {
   interests?: string[]
   counts?: Record<string, number>
   priorCases?: PriorCase[]
+  preferences?: PreferenceMap
 }
 
 const MAX_PER_CATEGORY = 10
@@ -78,11 +95,15 @@ type GeneratedQuest = {
   category: string
   title: string
   place_name: string
-  place_address?: string
-  place_types?: string[]
+  place_address: string
+  place_type: string
+  place_types: string[]
+  description: string
   clue: string
   default_hint: string
   bonus_hint: string
+  place_card_id?: string
+  gemini_description?: string
 }
 
 const INTEREST_QUERY_VARIANTS: Record<string, Array<(city: string, country: string) => string>> = {
@@ -169,6 +190,7 @@ Never say the place's official name, a common nickname, or any token that would 
 Every hint keeps mystery diction (clerk, file, sealed, porters, depot, briefing, evidence, classified) while staying factually clear.
 
 Hint 1 is 1–2 sentences that DIRECTLY state at least two of: function, appearance, history or age, location, significance. Facts first, atmosphere in the same breath. Example: "The night clerk stamps this on the 16th-century stone footbridge that still carries people over the canal; shops cling to both sides of the span."
+Hint 1 must be uniquely solvable: a clerk who knows the city should be able to name the exact venue from Hint 1 alone. Name the street or quarter, the kind of place, and one fact that no sibling venue shares. If two places in this city could fit the same sentence, it fails.
 Do not open with empty poetry, "they say the stones", or a uniqueness disclaimer.
 Hint 2: how to recognize it from the pavement — materials, neighbors, doors — still as a briefing.
 Hint 3: a confirmation detail to file as evidence — still never the proper name.
@@ -380,16 +402,34 @@ function pickPlaces(
   return picked
 }
 
-function queriesFor(category: string, city: string, country: string, prior: PriorCase[], count = 1) {
+function queriesFor(
+  category: string,
+  city: string,
+  country: string,
+  prior: PriorCase[],
+  count = 1,
+  preferences: PreferenceMap = {},
+) {
   const variants = INTEREST_QUERY_VARIANTS[category] || INTEREST_QUERY_VARIANTS.Landmarks
   const loved = prior.filter(item => item.category === category && item.liked === true)
   const passed = prior.filter(item => item.category === category && item.liked === false)
-  const start = passed.length > loved.length ? 1 : 0
+  const subs = new Set(Object.values(preferences).flat())
+  let start = passed.length > loved.length ? 1 : 0
+  if (prefersHidden(preferences)) start = Math.max(start, 1)
   const chosen = count > 1
     ? variants.slice()
     : variants.slice(start, start + 3)
+  if (category === 'Food' && (subs.has('street') || subs.has('markets'))) {
+    chosen.unshift(variants[3], variants[1])
+  }
+  if (category === 'Shopping' && subs.has('books')) {
+    chosen.unshift(variants[2])
+  }
+  if (category === 'Nightlife' && (subs.has('drinks') || subs.has('music') || subs.has('underground'))) {
+    chosen.unshift(variants[2], variants[1])
+  }
   if (chosen.length < 2 && variants.length > 1) chosen.push(variants[variants.length - 1])
-  return chosen.map(build => build(city, country))
+  return [...new Set(chosen.map(build => build(city, country)))]
 }
 
 function normalizeCounts(interests: string[], counts?: Record<string, number>) {
@@ -425,11 +465,14 @@ function extractJson(text: string) {
   return JSON.parse(raw.slice(start, end + 1))
 }
 
+let placesNewDisabled = false
+
 async function searchPlacesNew(
   query: string,
   apiKey: string,
   options?: { includedType?: string; bias?: { lat: number; lng: number } | null },
 ): Promise<PlaceCandidate[]> {
+  if (placesNewDisabled) throw new Error('Places New quota exhausted')
   const payload: Record<string, unknown> = { textQuery: query, languageCode: 'en', pageSize: 20 }
   if (options?.includedType) payload.includedType = options.includedType
   if (options?.bias) {
@@ -452,6 +495,7 @@ async function searchPlacesNew(
   })
   if (!res.ok) {
     const detail = await res.text()
+    if (res.status === 429) placesNewDisabled = true
     throw new Error(`Places New ${res.status}: ${detail.slice(0, 280)}`)
   }
   const data = (await res.json()) as {
@@ -470,7 +514,7 @@ async function searchPlacesNew(
   }
   return (data.places ?? []).map(place => ({
     id: place.id || place.displayName?.text || query,
-    name: place.displayName?.text || 'Unknown place',
+    name: place.displayName?.text || '',
     address: place.formattedAddress || '',
     types: place.types || [],
     summary: place.editorialSummary?.text || place.generativeSummary?.overview?.text || '',
@@ -479,7 +523,7 @@ async function searchPlacesNew(
     primaryType: place.primaryType || '',
     lat: place.location?.latitude,
     lng: place.location?.longitude,
-  }))
+  })).filter(place => Boolean(place.name && place.name.toLowerCase() !== 'unknown place'))
 }
 
 async function searchPlacesLegacy(query: string, apiKey: string): Promise<PlaceCandidate[]> {
@@ -505,14 +549,14 @@ async function searchPlacesLegacy(query: string, apiKey: string): Promise<PlaceC
   }
   return (data.results ?? []).map(place => ({
     id: place.place_id || place.name || query,
-    name: place.name || 'Unknown place',
+    name: place.name || '',
     address: place.formatted_address || '',
     types: place.types || [],
     summary: '',
     rating: place.rating ?? null,
     ratings: place.user_ratings_total ?? 0,
     primaryType: place.types?.[0] || '',
-  }))
+  })).filter(place => Boolean(place.name && place.name.toLowerCase() !== 'unknown place'))
 }
 
 async function findPlaces(
@@ -523,21 +567,119 @@ async function findPlaces(
   try {
     const latest = await searchPlacesNew(query, apiKey, { bias })
     if (latest.length > 0) return latest
-  } catch {
-    // Fall through to the classic Places Text Search.
+  } catch (error) {
+    console.error('Places New search failed:', error instanceof Error ? error.message : error)
   }
   try {
     return await searchPlacesLegacy(query, apiKey)
-  } catch {
+  } catch (error) {
+    console.error('Places legacy search failed:', error instanceof Error ? error.message : error)
     return []
   }
 }
 
 async function geocodeCity(city: string, country: string, apiKey: string) {
-  const hits = await searchPlacesNew(`${city}, ${country}`, apiKey).catch(() => [])
-  const hit = hits.find(place => typeof place.lat === 'number' && typeof place.lng === 'number')
-  if (!hit || hit.lat == null || hit.lng == null) return null
-  return { lat: hit.lat, lng: hit.lng }
+  if (apiKey && !placesNewDisabled) {
+    const hits = await searchPlacesNew(`${city}, ${country}`, apiKey).catch(() => [])
+    const hit = hits.find(place => typeof place.lat === 'number' && typeof place.lng === 'number')
+    if (hit && hit.lat != null && hit.lng != null) return { lat: hit.lat, lng: hit.lng }
+  }
+  const osm = await geocodeOsm(city, country)
+  return osm ? { lat: osm.lat, lng: osm.lng } : null
+}
+
+async function fetchPlaceDetails(id: string, apiKey: string): Promise<Partial<PlaceCandidate> | null> {
+  const placeId = id.startsWith('places/') ? id : `places/${id}`
+  try {
+    const res = await fetch(`https://places.googleapis.com/v1/${placeId}`, {
+      headers: {
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask':
+          'id,displayName,formattedAddress,types,editorialSummary,generativeSummary,primaryType,location,rating,userRatingCount',
+      },
+    })
+    if (!res.ok) return null
+    const place = (await res.json()) as {
+      id?: string
+      displayName?: { text?: string }
+      formattedAddress?: string
+      types?: string[]
+      editorialSummary?: { text?: string }
+      generativeSummary?: { overview?: { text?: string } }
+      primaryType?: string
+      location?: { latitude?: number; longitude?: number }
+      rating?: number
+      userRatingCount?: number
+    }
+    return {
+      id: place.id || id,
+      name: place.displayName?.text || '',
+      address: place.formattedAddress || '',
+      types: place.types || [],
+      summary: place.editorialSummary?.text || place.generativeSummary?.overview?.text || '',
+      primaryType: place.primaryType || '',
+      lat: place.location?.latitude,
+      lng: place.location?.longitude,
+      rating: place.rating ?? null,
+      ratings: place.userRatingCount ?? 0,
+    }
+  } catch {
+    return null
+  }
+}
+
+async function completePlace(
+  place: PlaceCandidate,
+  apiKey: string,
+  city: string,
+  country: string,
+): Promise<PlaceCandidate> {
+  const needsAddress = !place.address.trim()
+  const needsTypes = place.types.length === 0 && !place.primaryType
+  const needsSummary = !place.summary.trim()
+  let next = { ...place }
+  if (place.id.startsWith('osm:')) {
+    return {
+      ...next,
+      address: next.address.trim() || `${city}, ${country}`,
+    }
+  }
+  if ((needsAddress || needsTypes || needsSummary) && place.id && place.id !== place.name) {
+    const details = await fetchPlaceDetails(place.id, apiKey)
+    if (details) {
+      next = {
+        ...next,
+        name: next.name || details.name || '',
+        address: next.address || details.address || '',
+        types: next.types.length ? next.types : details.types || [],
+        summary: next.summary || details.summary || '',
+        primaryType: next.primaryType || details.primaryType || '',
+        lat: next.lat ?? details.lat,
+        lng: next.lng ?? details.lng,
+        rating: next.rating ?? details.rating ?? null,
+        ratings: next.ratings || details.ratings || 0,
+      }
+    }
+  }
+  if (!next.address.trim()) next.address = `${city}, ${country}`
+  return next
+}
+
+function factsForQuest(
+  quest: GeneratedQuest,
+  place: PlaceCandidate & { category?: string },
+  city: string,
+  country: string,
+): GeneratedQuest {
+  return withPlaceFacts(quest, {
+    name: place.name,
+    address: place.address,
+    types: place.types,
+    primaryType: place.primaryType,
+    summary: place.summary,
+    city,
+    country,
+  })
 }
 
 function placeKind(place: PlaceCandidate): string {
@@ -633,7 +775,10 @@ function fallbackQuest(category: string, place: PlaceCandidate, city: string): G
   const clue = fieldNote
     ? `The night clerk files this on the ${kind} at ${street}: ${fieldNote}`
     : `The night clerk files this on the ${kind} at ${street} — it ${placeRole(place)}. Look for ${placeLook(place)}.`
-  return {
+  const description = place.summary
+    ? `${place.name} is a ${kind} at ${place.address || street}. ${place.summary.replace(/\s+/g, ' ').trim()}`
+    : `${place.name} is a ${kind} at ${place.address || street}.`
+  return withPlaceFacts({
     category,
     title: `${titleByCategory[category] || 'The File Without a Cover'} — ${street}`,
     place_name: place.name,
@@ -644,7 +789,17 @@ function fallbackQuest(category: string, place: PlaceCandidate, city: string): G
     bonus_hint: fieldNote
       ? `On arrival, file this against what you see at ${street}: ${fieldNote} That match is the seal on the case.`
       : `Stand at ${street} and file one detail a copyist could not steal from another ${kind} in ${city} — a number, a view, a worn threshold, or a neighbor you can name by trade.`,
-  }
+    gemini_description: description,
+    description,
+    place_type: '',
+  }, {
+    name: place.name,
+    address: place.address,
+    types: place.types,
+    primaryType: place.primaryType,
+    summary: place.summary,
+    city,
+  })
 }
 
 function ensureDistinctQuests(quests: GeneratedQuest[]): GeneratedQuest[] {
@@ -727,13 +882,9 @@ Fields of inquiry: ${interests.join(', ')}.
 Prior case reactions — lean toward what they loved. If they passed / disliked a trail, do not repeat that venue, neighborhood, or the same kind of place:
 ${priorLines}
 
-Write one distinct case for each of the following real places. You know the true name. The player must not.
-If several belong to the same specialty, they are still SEPARATE files: different venue, different quarter, different kind of place, different clues.
-A traveler who solved one must not be able to use that walk to close another.
-Use the Address, Types, and Summary as the clues.
-Hint 1 must be a direct statement of function, appearance, history or age, location, or civic significance, spoken as a night-clerk briefing. Pull age, role, and look from the Summary whenever it exists. Name the street or quarter from the Address line.
-Hints 2 and 3 keep the same diction: pavement tells, then evidence to file.
-Do not invent a canal, hill, or spire that is not implied by that place.
+Write clues for each location card below. The card — name, address, type, and description — is already chosen. That card is the sealed answer. Do not invent another venue, do not swap in a more famous sibling, and do not write a clue that could equally fit two places.
+A clerk who reads Hint 1 must be able to name this exact answer.
+Use the Address, Types, and Summary as the only facts. The archive description MAY use the official name. The three hints must never speak it.
 
 ${placeLines}
 
@@ -743,15 +894,16 @@ Return JSON only, in this shape:
     {
       "category": "Landmarks",
       "title": "enigmatic case-file title",
-      "place_name": "exact true name from the briefing",
-      "clue": "hint 1: clear facts in mystery diction — function, look, age, location, or significance",
-      "default_hint": "hint 2: pavement recognition, still a briefing",
+      "place_name": "exact true name from the briefing — the sealed answer",
+      "description": "2-3 factual sentences for the archive, using the real name, address, and type",
+      "clue": "hint 1: uniquely identifying facts aimed at this sealed answer",
+      "default_hint": "hint 2: pavement recognition for this same answer",
       "bonus_hint": "hint 3: confirmation to file as evidence, still without the proper name"
     }
   ]
 }
 
-Each hint is two to four sentences, second person, MotME night-clerk voice. Hint 1 stays short, factual, and atmospheric.`
+Each hint is two to four sentences, second person, MotME night-clerk voice. Hint 1 stays short, factual, atmospheric, and uniquely solvable to the sealed answer.`
 }
 
 async function writeWithGemini(prompt: string, apiKey: string): Promise<GeneratedQuest[]> {
@@ -799,13 +951,18 @@ async function writeWithGemini(prompt: string, apiKey: string): Promise<Generate
         lastError = `Gemini ${model} returned an empty dossier`
         continue
       }
-      return quests.map((quest: Partial<GeneratedQuest>) => ({
+      return quests.map((quest: Partial<GeneratedQuest> & { description?: string }) => ({
         category: String(quest.category || ''),
         title: String(quest.title || 'The File Without a Cover'),
         place_name: String(quest.place_name || ''),
+        place_address: String(quest.place_address || ''),
+        place_type: String(quest.place_type || ''),
+        place_types: Array.isArray(quest.place_types) ? quest.place_types.map(String) : [],
+        description: String(quest.description || quest.gemini_description || ''),
         clue: String(quest.clue || ''),
         default_hint: String(quest.default_hint || ''),
         bonus_hint: String(quest.bonus_hint || ''),
+        gemini_description: String(quest.gemini_description || quest.description || ''),
       }))
     }
   }
@@ -816,6 +973,8 @@ async function writeWithGemini(prompt: string, apiKey: string): Promise<Generate
 function polishQuests(
   generated: GeneratedQuest[],
   selected: Array<PlaceCandidate & { category: string }>,
+  city: string,
+  country: string,
 ) {
   const usedTitles = new Set<string>()
   return selected.map(place => {
@@ -834,16 +993,24 @@ function polishQuests(
       title = district ? `${title.replace(/ — .*$/, '')} — ${district}` : `${title} ${index + 1}`
     }
     usedTitles.add(foldName(title))
-    return {
-      category: place.category,
-      title,
-      place_name: place.name,
-      place_address: place.address,
-      place_types: place.types,
-      clue: stripMetaUniqueness(redactName(match.clue, place.name)),
-      default_hint: stripMetaUniqueness(redactName(match.default_hint, place.name)),
-      bonus_hint: stripMetaUniqueness(redactName(match.bonus_hint, place.name)),
-    }
+    return factsForQuest(
+      {
+        category: place.category,
+        title,
+        place_name: place.name,
+        place_address: place.address,
+        place_type: '',
+        place_types: place.types,
+        description: match.description || match.gemini_description || place.summary || '',
+        clue: stripMetaUniqueness(redactName(match.clue, place.name)),
+        default_hint: stripMetaUniqueness(redactName(match.default_hint, place.name)),
+        bonus_hint: stripMetaUniqueness(redactName(match.bonus_hint, place.name)),
+        gemini_description: match.gemini_description || place.summary || '',
+      },
+      place,
+      city,
+      country,
+    )
   })
 }
 
@@ -935,6 +1102,405 @@ export async function handleQuestApi(req: IncomingMessage, res: ServerResponse):
   return handleVerifyGuess(req, res)
 }
 
+function catalogAsPlace(card: CatalogCard): PlaceCandidate & { category: string } {
+  return {
+    id: card.googlePlaceId,
+    name: card.googlePlaceName,
+    address: card.address,
+    types: card.placeTypes,
+    summary: card.googleSummary || card.geminiDescription,
+    rating: card.rating,
+    ratings: card.ratingsCount,
+    primaryType: card.primaryType,
+    lat: card.lat ?? undefined,
+    lng: card.lng ?? undefined,
+    category: card.category,
+  }
+}
+
+function placeAsLike(place: PlaceCandidate & { category?: string }, hint1 = '') {
+  return {
+    googlePlaceId: place.id,
+    googlePlaceName: place.name,
+    address: place.address,
+    category: place.category,
+    primaryType: place.primaryType,
+    lat: place.lat,
+    lng: place.lng,
+    hint1,
+    identityFacts: identityFactsOf({
+      name: place.name,
+      address: place.address,
+      types: place.types,
+      primaryType: place.primaryType,
+      summary: place.summary,
+    }),
+    placeTypes: place.types,
+    rating: place.rating,
+    ratingsCount: place.ratings,
+  }
+}
+
+function readGuessName(entry: unknown) {
+  if (typeof entry === 'string') return entry.trim()
+  if (!entry || typeof entry !== 'object') return ''
+  const row = entry as { place_name?: string; placeName?: string; name?: string }
+  return String(row.place_name || row.placeName || row.name || '').trim()
+}
+
+async function verifyHint1Batch(
+  items: Array<{ clue: string; placeName: string; address?: string; summary?: string }>,
+  city: string,
+  country: string,
+  geminiKey: string,
+) {
+  if (items.length === 0) return [] as Array<{ ok: boolean; guess: string }>
+  try {
+    const parsed = await askGeminiJson(
+      `You are a well-traveled night clerk who knows ${city}, ${country}.
+For each briefing, name the real venue it describes. Use ONLY that clue. Do not pick a more famous sibling of the same type.
+Return JSON: { "guesses": [{ "index": 1, "place_name": "official name, or empty if unknown" }] }
+
+${items.map((item, index) => `${index + 1}. ${item.clue}`).join('\n\n')}`,
+      geminiKey,
+    )
+    const guesses = Array.isArray(parsed.guesses) ? parsed.guesses : []
+    return items.map((item, index) => {
+      const guess = readGuessName(guesses.find((row: { index?: number }) => Number(row.index) === index + 1) || guesses[index])
+      if (guess && guessFitsCase(guess, { placeName: item.placeName, address: item.address })) {
+        return { ok: true, guess }
+      }
+      return {
+        ok: hintCarriesIdentity(item.clue, { name: item.placeName, address: item.address, summary: item.summary }),
+        guess,
+      }
+    })
+  } catch {
+    return items.map(item => ({
+      ok: hintCarriesIdentity(item.clue, { name: item.placeName, address: item.address, summary: item.summary }),
+      guess: '',
+    }))
+  }
+}
+
+async function rewriteHint1(
+  quest: GeneratedQuest,
+  place: PlaceCandidate & { category: string },
+  city: string,
+  geminiKey: string,
+  wrongGuess?: string,
+) {
+  const street = streetOf(place)
+  const kind = placeKind(place)
+  try {
+    const parsed = await askGeminiJson(
+      `${NARRATOR_VOICE}
+
+Rewrite Hint 1 for a sealed case in ${city}.
+The previous clue failed uniqueness. ${wrongGuess ? `A clerk who only had that clue named "${wrongGuess}".` : 'A clerk who only had that clue could not name the venue.'}
+Previous clue: ${quest.clue}
+True name (never speak it): ${place.name}
+Address: ${place.address || 'unlisted'}
+Kind: ${kind}
+Street: ${street}
+Summary: ${place.summary || 'none on file'}
+
+Hint 1 must let a clerk name this exact venue from the clue alone. Use the street, the kind of place, and one fact no sibling venue shares. Never speak the official name.
+Return JSON: { "clue": "..." }`,
+      geminiKey,
+    )
+    const clue = redactName(String(parsed.clue || '').trim(), place.name)
+    if (clue.length >= 40) return clue
+  } catch {
+    // Fall through to the field-note clue.
+  }
+  return fallbackQuest(place.category, place, city).clue
+}
+
+async function persistGeneratedCard(
+  place: PlaceCandidate & { category: string },
+  quest: GeneratedQuest,
+  city: string,
+  country: string,
+): Promise<GeneratedQuest | null> {
+  const complete = factsForQuest(quest, place, city, country)
+  if (!questHasPlaceFacts(complete)) return null
+  const saved = await savePlaceCard({
+    googlePlaceId: place.id,
+    googlePlaceName: complete.place_name,
+    address: complete.place_address,
+    city,
+    country,
+    category: place.category,
+    placeTypes: complete.place_types,
+    primaryType: place.primaryType,
+    lat: place.lat,
+    lng: place.lng,
+    rating: place.rating,
+    ratingsCount: place.ratings,
+    googleSummary: place.summary || '',
+    geminiDescription: complete.description,
+    title: complete.title,
+    hint1: complete.clue,
+    hint2: complete.default_hint,
+    hint3: complete.bonus_hint,
+    identityFacts: identityFactsOf({
+      name: complete.place_name,
+      address: complete.place_address,
+      types: complete.place_types,
+      primaryType: place.primaryType,
+      summary: place.summary,
+    }),
+    sources: {
+      google: place.summary ? 'places_summary' : 'places_search',
+      gemini: complete.description ? 'gemini_description' : 'composed_description',
+    },
+  })
+  return saved
+    ? { ...complete, place_card_id: saved.id, gemini_description: saved.geminiDescription, description: saved.geminiDescription || complete.description }
+    : complete
+}
+
+const BASE_SPECIALTIES = ['Landmarks', 'Food', 'Museums', 'Nature']
+
+async function choosePlacesForNeeds(params: {
+  city: string
+  country: string
+  shortfalls: Array<{ interest: string; needed: number }>
+  catalog: CatalogCard[]
+  alreadyChosen: CatalogCard[]
+  priorCases: PriorCase[]
+  preferences: PreferenceMap
+  placesKey: string
+  lean?: boolean
+}) {
+  const { city, country, shortfalls, catalog, alreadyChosen, priorCases, preferences, placesKey, lean } = params
+  const selected: Array<PlaceCandidate & { category: string }> = []
+  if (shortfalls.length === 0) return selected
+
+  const totalCases = shortfalls.reduce((sum, item) => sum + item.needed, 0)
+  const spread = lean ? false : totalCases > 1 || alreadyChosen.length > 0 || catalog.length > 0
+  const bias = await geocodeCity(city, country, placesKey)
+  const blocked = [...catalog.map(catalogAsPlace), ...alreadyChosen.map(catalogAsPlace)]
+
+  const searchResults = !placesKey || placesNewDisabled
+    ? shortfalls.map(({ interest, needed }) => ({ interest, needed, found: [] as PlaceCandidate[] }))
+    : await Promise.all(
+    shortfalls.map(async ({ interest, needed }) => {
+      const queries = queriesFor(
+        interest,
+        city,
+        country,
+        priorCases,
+        spread ? Math.max(needed, 2) : needed,
+        preferences,
+      ).slice(0, lean ? 1 : undefined)
+      const typed = spread
+        ? (INCLUDED_TYPES[interest] || []).map(type =>
+            searchPlacesNew(
+              `${type.replace(/_/g, ' ')}s in ${city}, ${country}`,
+              placesKey,
+              { includedType: type, bias },
+            ).catch(() => []),
+          )
+        : []
+      const batches = await Promise.all([
+        ...queries.map(query => findPlaces(query, placesKey, bias)),
+        ...typed,
+      ])
+      const merged = uniquePlaces(batches.flat())
+      const local = merged.filter(place => belongsToDestination(place, city, country, bias))
+      const found = (local.length > 0 ? local : merged).filter(place => {
+        const like = placeAsLike({ ...place, category: interest })
+        if (blocked.some(item => isSamePlace(item, place) || cardsTooSimilar(placeAsLike(item), like))) return false
+        if (selected.some(item => isSamePlace(item, place) || cardsTooSimilar(placeAsLike(item), like))) return false
+        return true
+      })
+      return { interest, found, needed }
+    }),
+  )
+
+  const needsOsm = searchResults.some(item => item.found.length < item.needed)
+  const osmPool = needsOsm ? await loadOsmPlaces(city, country, bias) : []
+  const withOsm = searchResults.map(item => {
+    if (item.found.length >= item.needed) return item
+    const extra = osmPlacesForInterest(osmPool, item.interest).map(place => ({
+      id: place.id,
+      name: place.name,
+      address: place.address,
+      types: place.types,
+      summary: place.summary,
+      rating: place.rating,
+      ratings: place.ratings,
+      primaryType: place.primaryType,
+      lat: place.lat,
+      lng: place.lng,
+    }))
+    const merged = uniquePlaces([...item.found, ...extra]).filter(place => {
+      const like = placeAsLike({ ...place, category: item.interest })
+      if (blocked.some(blockedPlace => isSamePlace(blockedPlace, place) || cardsTooSimilar(placeAsLike(blockedPlace), like))) return false
+      return belongsToDestination(place, city, country, bias) || extra.some(osmPlace => osmPlace.id === place.id)
+    })
+    return { ...item, found: merged }
+  })
+
+  for (const { interest, found, needed } of withOsm) {
+    const chosen = pickPlaces(found, interest, priorCases, needed, [...blocked, ...selected])
+    const filled = await Promise.all(chosen.map(place => completePlace(place, placesKey, city, country)))
+    for (const place of filled) {
+      if (!place.name.trim() || !place.address.trim()) continue
+      const like = placeAsLike({ ...place, category: interest })
+      if (alreadyChosen.some(card => cardsTooSimilar(card, like))) continue
+      if (selected.some(item => isSamePlace(item, place) || cardsTooSimilar(placeAsLike(item), like))) continue
+      selected.push({ ...place, category: interest })
+    }
+  }
+
+  const uniqueSelected: Array<PlaceCandidate & { category: string }> = []
+  for (const place of selected) {
+    if (uniqueSelected.some(item => isSamePlace(item, place))) continue
+    uniqueSelected.push(place)
+  }
+  return uniqueSelected
+}
+
+async function writeHintsForChosenPlaces(
+  selected: Array<PlaceCandidate & { category: string }>,
+  city: string,
+  country: string,
+  interests: string[],
+  priorCases: PriorCase[],
+  gemini: string,
+) {
+  if (selected.length === 0) return [] as GeneratedQuest[]
+  if (!gemini) return selected.map(place => fallbackQuest(place.category, place, city))
+
+  let minted: GeneratedQuest[] = []
+  const chunkSize = 6
+  for (let i = 0; i < selected.length; i += chunkSize) {
+    const chunk = selected.slice(i, i + chunkSize)
+    try {
+      const generated = await writeWithGemini(buildPrompt(city, country, interests, chunk, priorCases), gemini)
+      minted = minted.concat(polishQuests(generated, chunk, city, country))
+    } catch (error) {
+      console.error('Gemini briefing failed, using field notes:', error)
+      minted = minted.concat(chunk.map(place => fallbackQuest(place.category, place, city)))
+    }
+  }
+
+  const solved = await verifyHint1Batch(
+    minted.map(quest => {
+      const place = selected.find(item => foldName(item.name) === foldName(quest.place_name))
+      return {
+        clue: quest.clue,
+        placeName: quest.place_name,
+        address: quest.place_address || place?.address,
+        summary: place?.summary,
+      }
+    }),
+    city,
+    country,
+    gemini,
+  )
+  return Promise.all(
+    minted.map(async (quest, index) => {
+      if (solved[index]?.ok) return quest
+      const place = selected.find(item => foldName(item.name) === foldName(quest.place_name))
+      if (!place) return quest
+      const clue = await rewriteHint1(quest, place, city, gemini, solved[index]?.guess)
+      return { ...quest, clue }
+    }),
+  )
+}
+
+async function persistChosenCards(
+  selected: Array<PlaceCandidate & { category: string }>,
+  minted: GeneratedQuest[],
+  alreadyChosen: CatalogCard[],
+  city: string,
+  country: string,
+) {
+  const kept: GeneratedQuest[] = []
+  for (const quest of minted) {
+    const place = selected.find(item => foldName(item.name) === foldName(quest.place_name))
+    if (!place) continue
+    const like = placeAsLike(place, quest.clue)
+    if (alreadyChosen.some(card => cardsTooSimilar(card, like))) continue
+    if (kept.some(item => foldName(item.place_name) === foldName(quest.place_name))) continue
+    const sibling = kept.find(item => {
+      const other = selected.find(placeItem => foldName(placeItem.name) === foldName(item.place_name))
+      return other ? cardsTooSimilar(placeAsLike(other, item.clue), like) : false
+    })
+    if (sibling) continue
+    const saved = await persistGeneratedCard(place, quest, city, country)
+    if (saved) kept.push(saved)
+  }
+  return kept
+}
+
+export async function mintBaseCardsForCity(
+  city: string,
+  country: string,
+  options?: { min?: number; priorCases?: PriorCase[]; preferences?: PreferenceMap; useGemini?: boolean; lean?: boolean },
+) {
+  const keys = apiKeys()
+  const gemini = options?.useGemini === false ? '' : keys.gemini
+  const placesKey = keys.places
+  const min = options?.min ?? 3
+  const catalog = await loadPlaceCards(city, country)
+  if (catalog.length >= min) {
+    return { saved: 0, existing: catalog.length, quests: [] as GeneratedQuest[] }
+  }
+
+  const haveCategories = new Set(catalog.map(card => card.category))
+  const shortfalls = BASE_SPECIALTIES
+    .filter(interest => !haveCategories.has(interest))
+    .map(interest => ({ interest, needed: 1 }))
+  if (shortfalls.length === 0) {
+    shortfalls.push({ interest: 'Landmarks', needed: Math.max(1, min - catalog.length) })
+  } else {
+    while (shortfalls.reduce((sum, item) => sum + item.needed, 0) < min - catalog.length) {
+      shortfalls.push({ interest: BASE_SPECIALTIES[shortfalls.length % BASE_SPECIALTIES.length], needed: 1 })
+    }
+  }
+
+  const selected = await choosePlacesForNeeds({
+    city,
+    country,
+    shortfalls,
+    catalog,
+    alreadyChosen: [],
+    priorCases: options?.priorCases || [],
+    preferences: options?.preferences || {},
+    placesKey,
+    lean: options?.lean,
+  })
+  const drafted = await writeHintsForChosenPlaces(
+    selected,
+    city,
+    country,
+    shortfalls.map(item => item.interest),
+    options?.priorCases || [],
+    gemini,
+  )
+  const quests = await persistChosenCards(selected, drafted, [], city, country)
+  if (quests.length === 0) {
+    console.error(`mintBaseCardsForCity empty for ${city}, ${country}: key=${Boolean(placesKey)} selected=${selected.length} drafted=${drafted.length}`)
+  }
+  return { saved: quests.length, existing: catalog.length, quests }
+}
+
+export async function ensureBaseCards(
+  city: string,
+  country: string,
+  options?: { priorCases?: PriorCase[]; preferences?: PreferenceMap },
+) {
+  const catalog = await loadPlaceCards(city, country)
+  if (catalog.length >= 3) return catalog
+  await mintBaseCardsForCity(city, country, { min: 3, ...options })
+  return loadPlaceCards(city, country)
+}
+
 export async function handleGenerateQuests(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   if (req.method === 'OPTIONS') {
     send(res, 204, null)
@@ -953,6 +1519,7 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
     const interests = (payload.interests || []).map(item => String(item).trim()).filter(Boolean)
     const counts = normalizeCounts(interests, payload.counts)
     const priorCases = Array.isArray(payload.priorCases) ? payload.priorCases : []
+    const preferences = payload.preferences || {}
 
     if (!city || !country || interests.length === 0) {
       send(res, 400, { error: 'Destination and fields of inquiry are required.' })
@@ -960,84 +1527,71 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
     }
 
     const { gemini, places: placesKey } = apiKeys()
-    if (!placesKey) {
-      send(res, 500, { error: 'GOOGLE_PLACE_API_KEY is not on file.' })
-      return true
+    const catalog = await ensureBaseCards(city, country, { priorCases, preferences })
+    const selectedCards: CatalogCard[] = []
+    for (const interest of interests) {
+      const needed = counts[interest] || 1
+      selectedCards.push(...pickCatalogCards(catalog, interest, needed, priorCases, selectedCards, preferences))
     }
 
-    const totalCases = interests.reduce((sum, interest) => sum + (counts[interest] || 1), 0)
-    const spread = totalCases > 1
-    const bias = await geocodeCity(city, country, placesKey)
+    const shortfalls = interests
+      .map(interest => ({
+        interest,
+        needed: Math.max(0, (counts[interest] || 1) - selectedCards.filter(card => card.category === interest).length),
+      }))
+      .filter(item => item.needed > 0)
 
-    const selected: Array<PlaceCandidate & { category: string }> = []
-    const searchResults = await Promise.all(
-      interests.map(async interest => {
-        const needed = counts[interest] || 1
-        const queries = queriesFor(interest, city, country, priorCases, spread ? Math.max(needed, 2) : needed)
-        const typed = spread
-          ? (INCLUDED_TYPES[interest] || []).map(type =>
-              searchPlacesNew(
-                `${type.replace(/_/g, ' ')}s in ${city}, ${country}`,
-                placesKey,
-                { includedType: type, bias },
-              ).catch(() => []),
-            )
-          : []
-        const batches = await Promise.all([
-          ...queries.map(query => findPlaces(query, placesKey, bias)),
-          ...typed,
-        ])
-        const merged = uniquePlaces(batches.flat())
-        const local = merged.filter(place => belongsToDestination(place, city, country, bias))
-        const found = local.length > 0 ? local : merged
-        return { interest, found, needed }
-      }),
-    )
-
-    for (const { interest, found, needed } of searchResults) {
-      const chosen = pickPlaces(found, interest, priorCases, needed, selected)
-      for (const place of chosen) selected.push({ ...place, category: interest })
+    let selected: Array<PlaceCandidate & { category: string }> = []
+    let minted: GeneratedQuest[] = []
+    if (shortfalls.length > 0) {
+      selected = await choosePlacesForNeeds({
+        city,
+        country,
+        shortfalls,
+        catalog,
+        alreadyChosen: selectedCards,
+        priorCases,
+        preferences,
+        placesKey,
+      })
+      const drafted = await writeHintsForChosenPlaces(selected, city, country, interests, priorCases, gemini)
+      minted = await persistChosenCards(selected, drafted, selectedCards, city, country)
     }
 
-    const uniqueSelected: Array<PlaceCandidate & { category: string }> = []
-    for (const place of selected) {
-      if (uniqueSelected.some(item => isSamePlace(item, place))) continue
-      uniqueSelected.push(place)
-    }
-    selected.length = 0
-    selected.push(...uniqueSelected)
-
-    if (selected.length === 0) {
+    if (selectedCards.length === 0 && minted.length === 0) {
       send(res, 502, { error: 'The field office found no venues in that city.' })
       return true
     }
 
-    let quests: GeneratedQuest[] = []
-    if (gemini) {
-      const chunkSize = 6
-      for (let i = 0; i < selected.length; i += chunkSize) {
-        const chunk = selected.slice(i, i + chunkSize)
-        try {
-          const generated = await writeWithGemini(buildPrompt(city, country, interests, chunk, priorCases), gemini)
-          quests = quests.concat(polishQuests(generated, chunk))
-        } catch (error) {
-          console.error('Gemini briefing failed, using field notes:', error)
-          quests = quests.concat(chunk.map(place => fallbackQuest(place.category, place, city)))
-        }
-      }
-    } else {
-      quests = selected.map(place => fallbackQuest(place.category, place, city))
-    }
-
     const seenVenues = new Set<string>()
-    quests = ensureDistinctQuests(
-      quests.filter(quest => {
-        const key = foldName(quest.place_name) || foldName(quest.title)
-        if (!key || seenVenues.has(key)) return false
-        seenVenues.add(key)
-        return true
-      }),
+    const quests = ensureDistinctQuests(
+      [...selectedCards.map(catalogToQuest), ...minted]
+        .map(quest => {
+          const place = selected.find(item => foldName(item.name) === foldName(quest.place_name))
+          const card = selectedCards.find(item => foldName(item.googlePlaceName) === foldName(quest.place_name))
+          return withPlaceFacts(quest, {
+            name: place?.name || card?.googlePlaceName,
+            address: place?.address || card?.address,
+            types: place?.types || card?.placeTypes,
+            primaryType: place?.primaryType || card?.primaryType,
+            summary: place?.summary || card?.googleSummary || card?.geminiDescription,
+            city,
+            country,
+          })
+        })
+        .filter(quest => {
+          if (!questHasPlaceFacts(quest)) return false
+          const key = foldName(quest.place_name) || foldName(quest.title)
+          if (!key || seenVenues.has(key)) return false
+          seenVenues.add(key)
+          return true
+        }),
     )
+
+    if (quests.length === 0) {
+      send(res, 502, { error: 'The field office found no complete venues in that city.' })
+      return true
+    }
 
     send(res, 200, { quests })
   } catch (error) {

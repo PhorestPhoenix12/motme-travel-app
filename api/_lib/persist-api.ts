@@ -1,8 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { and, desc, eq, notInArray } from 'drizzle-orm'
+import { and, desc, eq, inArray } from 'drizzle-orm'
 import { verifyToken } from '@clerk/backend'
 import { clerkSecretKey, db } from './db'
-import { profiles, questRecords, trips } from './schema'
+import { foldKey, placeTypeLabel, savePlaceCard } from './case-catalog'
+import { placeCards, profiles, trips, type TripCase } from './schema'
 import {
   albumPhotoKey,
   hasObjectStorage,
@@ -23,6 +24,13 @@ type QuestPayload = {
   photoUrl: string | null
   note: string
   liked: boolean | null
+  placeCardId?: string | null
+  placeName?: string
+  placeAddress?: string
+  placeTypes?: string[]
+  placeType?: string
+  placeDescription?: string
+  identification?: string
 }
 
 type ProfilePayload = {
@@ -42,6 +50,13 @@ type TripPayload = {
 }
 
 const MAX_INLINE_PHOTO = 180_000
+
+function uuidOrNull(value?: string | null) {
+  if (!value) return null
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value
+    : null
+}
 
 function send(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status
@@ -92,20 +107,6 @@ async function storePhoto(key: string, dataUrl: string) {
   }
 }
 
-async function questsWithPhotos(records: (typeof questRecords.$inferSelect)[]) {
-  return records.map(record => ({
-    id: record.questKey,
-    category: record.category,
-    title: record.title,
-    hints: record.hints,
-    unlockedHints: record.unlockedHints,
-    solved: record.solved,
-    photoUrl: record.photoKey ? photoProxyPath(record.photoKey) : record.photoData,
-    note: record.note,
-    liked: record.liked,
-  }))
-}
-
 async function rememberDestination(userId: string, country: string, city: string) {
   const label = `${city}, ${country}`
   const [profile] = await db.select().from(profiles).where(eq(profiles.clerkUserId, userId))
@@ -129,13 +130,107 @@ async function rememberDestination(userId: string, country: string, city: string
     })
 }
 
+function markFromQuest(
+  quest: QuestPayload,
+  previous: TripCase | undefined,
+  photos: { photoKey: string | null; photoData: string | null },
+): TripCase {
+  const placeCardId = uuidOrNull(quest.placeCardId) || previous?.placeCardId || null
+  const mark: TripCase = {
+    id: quest.id,
+    placeCardId,
+    unlockedHints: quest.unlockedHints,
+    solved: quest.solved,
+    photoKey: photos.photoKey,
+    photoData: photos.photoData,
+    note: quest.note,
+    liked: quest.liked,
+    identification: quest.identification || previous?.identification || null,
+  }
+  if (!placeCardId) {
+    mark.category = quest.category
+    mark.title = quest.title
+    mark.hints = quest.hints
+  }
+  return mark
+}
+
+async function filePlaceCard(quest: QuestPayload, city: string, country: string) {
+  const existingId = uuidOrNull(quest.placeCardId)
+  if (existingId) return existingId
+  const name = quest.placeName?.trim() || ''
+  const address = quest.placeAddress?.trim() || ''
+  const description = quest.placeDescription?.trim() || ''
+  if (!name || !address || !description) return null
+  const saved = await savePlaceCard({
+    googlePlaceId: `filed:${foldKey(country)}:${foldKey(city)}:${foldKey(name)}`,
+    googlePlaceName: name,
+    address,
+    city,
+    country,
+    category: quest.category,
+    placeTypes: quest.placeTypes || [],
+    primaryType: quest.placeType || '',
+    googleSummary: description,
+    geminiDescription: description,
+    title: quest.title,
+    hint1: quest.hints[0] || '',
+    hint2: quest.hints[1] || '',
+    hint3: quest.hints[2] || '',
+    identityFacts: [],
+    sources: { persist: 'trip_file' },
+  })
+  return saved?.id || null
+}
+
+function questFromMark(mark: TripCase, card?: typeof placeCards.$inferSelect): QuestPayload {
+  if (card) {
+    return {
+      id: mark.id,
+      category: card.category,
+      title: card.title,
+      hints: [card.hint1, card.hint2, card.hint3],
+      unlockedHints: mark.unlockedHints,
+      solved: mark.solved,
+      photoUrl: mark.photoKey ? photoProxyPath(mark.photoKey) : mark.photoData || null,
+      note: mark.note,
+      liked: mark.liked,
+      placeCardId: card.id,
+      placeName: card.googlePlaceName,
+      placeAddress: card.address,
+      placeTypes: card.placeTypes,
+      placeType: placeTypeLabel(card.placeTypes, card.primaryType, card.category) || card.primaryType,
+      placeDescription: card.geminiDescription || card.googleSummary,
+      identification: mark.identification || undefined,
+    }
+  }
+  return {
+    id: mark.id,
+    category: mark.category || 'Landmarks',
+    title: mark.title || 'The File Without a Cover',
+    hints: mark.hints || [],
+    unlockedHints: mark.unlockedHints,
+    solved: mark.solved,
+    photoUrl: mark.photoKey ? photoProxyPath(mark.photoKey) : mark.photoData || null,
+    note: mark.note,
+    liked: mark.liked,
+    placeCardId: mark.placeCardId || undefined,
+    identification: mark.identification || undefined,
+  }
+}
+
 async function serializeTrip(trip: typeof trips.$inferSelect) {
-  const records = await db.select().from(questRecords).where(eq(questRecords.tripId, trip.id))
+  const marks = Array.isArray(trip.cases) ? trip.cases : []
+  const cardIds = [...new Set(marks.map(mark => mark.placeCardId).filter((id): id is string => Boolean(id)))]
+  const cards = cardIds.length > 0
+    ? await db.select().from(placeCards).where(inArray(placeCards.id, cardIds))
+    : []
+  const byId = new Map(cards.map(card => [card.id, card]))
   return {
     country: trip.country,
     city: trip.city,
     keys: trip.keys,
-    quests: await questsWithPhotos(records),
+    quests: marks.map(mark => questFromMark(mark, mark.placeCardId ? byId.get(mark.placeCardId) : undefined)),
   }
 }
 
@@ -239,6 +334,39 @@ export async function handlePersistApi(req: IncomingMessage, res: ServerResponse
 
     if (url.pathname === '/api/me/trip' && req.method === 'PUT') {
       const data = await readJson<TripPayload>(req)
+      const previousCases = (
+        await db
+          .select({ cases: trips.cases })
+          .from(trips)
+          .where(and(eq(trips.clerkUserId, userId), eq(trips.country, data.country), eq(trips.city, data.city)))
+      )[0]?.cases || []
+      const existingByKey = new Map(previousCases.map(mark => [mark.id, mark]))
+
+      const nextCases: TripCase[] = []
+      for (const quest of data.quests) {
+        const previous = existingByKey.get(quest.id)
+        let photoKey = previous?.photoKey ?? photoKeyFromUrl(quest.photoUrl)
+        let photoData = previous?.photoData ?? null
+        if (isDataUrl(quest.photoUrl)) {
+          photoKey = albumPhotoKey(userId, data.country, data.city, quest.id)
+          try {
+            const stored = await storePhoto(photoKey, quest.photoUrl!)
+            photoKey = stored.photoKey
+            photoData = stored.photoData
+          } catch {
+            photoKey = previous?.photoKey ?? null
+            photoData = quest.photoUrl!.length <= MAX_INLINE_PHOTO ? quest.photoUrl : previous?.photoData ?? null
+          }
+        } else if (!quest.photoUrl) {
+          photoKey = null
+          photoData = null
+        } else {
+          photoData = photoKey ? null : photoData
+        }
+        const placeCardId = await filePlaceCard({ ...quest, placeCardId: quest.placeCardId || previous?.placeCardId }, data.city, data.country)
+        nextCases.push(markFromQuest({ ...quest, placeCardId: placeCardId || quest.placeCardId }, previous, { photoKey, photoData }))
+      }
+
       const [trip] = await db
         .insert(trips)
         .values({
@@ -246,80 +374,14 @@ export async function handlePersistApi(req: IncomingMessage, res: ServerResponse
           country: data.country,
           city: data.city,
           keys: data.keys,
+          cases: nextCases,
           updatedAt: new Date(),
         })
         .onConflictDoUpdate({
           target: [trips.clerkUserId, trips.country, trips.city],
-          set: { keys: data.keys, updatedAt: new Date() },
+          set: { keys: data.keys, cases: nextCases, updatedAt: new Date() },
         })
         .returning()
-
-      const existing = await db.select().from(questRecords).where(eq(questRecords.tripId, trip.id))
-      const existingByKey = new Map(existing.map(record => [record.questKey, record]))
-      const incomingKeys = data.quests.map(quest => quest.id)
-
-      if (data.quests.length > 0) {
-        const rows = []
-        for (const quest of data.quests) {
-          const previous = existingByKey.get(quest.id)
-          let photoKey = previous?.photoKey ?? photoKeyFromUrl(quest.photoUrl)
-          let photoData = previous?.photoData ?? null
-          if (isDataUrl(quest.photoUrl)) {
-            photoKey = albumPhotoKey(userId, data.country, data.city, quest.id)
-            try {
-              const stored = await storePhoto(photoKey, quest.photoUrl!)
-              photoKey = stored.photoKey
-              photoData = stored.photoData
-            } catch {
-              photoKey = previous?.photoKey ?? null
-              photoData = quest.photoUrl!.length <= MAX_INLINE_PHOTO ? quest.photoUrl : previous?.photoData ?? null
-            }
-          } else if (!quest.photoUrl) {
-            photoKey = null
-            photoData = null
-          } else {
-            photoData = photoKey ? null : photoData
-          }
-          rows.push({
-            tripId: trip.id,
-            questKey: quest.id,
-            category: quest.category,
-            title: quest.title,
-            hints: quest.hints,
-            unlockedHints: quest.unlockedHints,
-            solved: quest.solved,
-            photoKey,
-            photoData,
-            note: quest.note,
-            liked: quest.liked,
-          })
-        }
-        for (const row of rows) {
-          await db
-            .insert(questRecords)
-            .values(row)
-            .onConflictDoUpdate({
-              target: [questRecords.tripId, questRecords.questKey],
-              set: {
-                category: row.category,
-                title: row.title,
-                hints: row.hints,
-                unlockedHints: row.unlockedHints,
-                solved: row.solved,
-                photoKey: row.photoKey,
-                photoData: row.photoData,
-                note: row.note,
-                liked: row.liked,
-              },
-            })
-        }
-      }
-
-      if (incomingKeys.length === 0) {
-        await db.delete(questRecords).where(eq(questRecords.tripId, trip.id))
-      } else {
-        await db.delete(questRecords).where(and(eq(questRecords.tripId, trip.id), notInArray(questRecords.questKey, incomingKeys)))
-      }
 
       await rememberDestination(userId, data.country, data.city)
       send(res, 200, { ok: true, trip: await serializeTrip(trip) })
