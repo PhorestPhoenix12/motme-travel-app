@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
-import { countryByCode, countryByName } from '../../src/data/countries'
+import { countryByCode, countryByName } from './countries'
 
 const CITY_TYPES = new Set([
   'locality',
@@ -585,3 +585,5 @@ export async function handleDestinationsApi(req: IncomingMessage, res: ServerRes
   }
   return true
 }
+
+export default handleDestinationsApi
