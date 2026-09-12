@@ -5,7 +5,6 @@ import AlbumPage from './AlbumPage'
 import IntroPage, { AuthGateSplash, ClerkIntroPage } from './IntroPage'
 import { countryByName } from './data/countries'
 import { QUEST_VARIANTS } from './data/quest-variants'
-import { guessFitsCase } from './lib/identify'
 import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, mergeTripPhotos, persistTrip, secretForQuest, uploadQuestPhoto, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
 import { createCitySession, listCities, resolveCity, searchCountries, suggestCities, type CitySuggestion } from './lib/destinations'
 
@@ -938,8 +937,8 @@ function CasesPage({
     }
 
     const guess = modalGuess.trim()
-    if (guess.length < 3) {
-      setModalError('The clerk needs a name, a place, or a description that a local would recognize.')
+    if (!guess) {
+      setModalError('The clerk needs something on the page before the wax can drop.')
       return
     }
 
@@ -947,41 +946,6 @@ function CasesPage({
     setModalError(null)
 
     const secret = secretForQuest(city, country, q)
-    let matched = guessFitsCase(guess, {
-      placeName: secret.placeName,
-      address: secret.placeAddress,
-      title: q.title,
-      hints: q.hints,
-    })
-    if (!matched) {
-      try {
-        const response = await fetch('/api/verify-guess', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            guess,
-            placeName: secret.placeName,
-            placeAddress: secret.placeAddress,
-            city,
-            country,
-            title: q.title,
-            hints: q.hints,
-          }),
-        })
-        const data = await response.json() as { match?: boolean; reason?: string; error?: string }
-        if (!response.ok) throw new Error(data.error || 'The wire went dead.')
-        matched = Boolean(data.match)
-        if (!matched) {
-          setModalError(data.reason || 'The ledgers do not agree. Look again, or name it more plainly.')
-          setSealing(false)
-          return
-        }
-      } catch {
-        setModalError('The night clerk cannot reach the central ledger. Try the proper name once more.')
-        setSealing(false)
-        return
-      }
-    }
 
     const keysEarned = 1 + (filedPhoto ? 1 : 0)
     onUpdateQuest(activeModal, {
@@ -1344,7 +1308,7 @@ function CasesPage({
                 </button>
                 <button
                   onClick={() => void handleSealCase()}
-                  disabled={sealing || photoBusy || modalGuess.trim().length < 3}
+                  disabled={sealing || photoBusy || !modalGuess.trim()}
                   className="ticket-btn flex-1 font-type text-xs py-2.5 px-6 transition-all hover:brightness-110 active:scale-95"
                   style={{
                     background: 'var(--burgundy)',
@@ -1352,8 +1316,8 @@ function CasesPage({
                     letterSpacing: '0.14em',
                     textTransform: 'uppercase',
                     border: 'none',
-                    cursor: sealing || photoBusy || modalGuess.trim().length < 3 ? 'not-allowed' : 'pointer',
-                    opacity: sealing || photoBusy || modalGuess.trim().length < 3 ? 0.55 : 1,
+                    cursor: sealing || photoBusy || !modalGuess.trim() ? 'not-allowed' : 'pointer',
+                    opacity: sealing || photoBusy || !modalGuess.trim() ? 0.55 : 1,
                     boxShadow: '0 0 20px rgba(124,27,44,0.4)',
                   }}
                 >

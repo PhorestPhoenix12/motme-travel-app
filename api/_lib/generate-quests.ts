@@ -2,8 +2,6 @@ import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import tls from 'node:tls'
-import { guessFitsCase } from '../../src/lib/identify'
-
 try {
   tls.setDefaultCACertificates([
     ...tls.getCACertificates(),
@@ -916,61 +914,10 @@ async function handleVerifyGuess(req: IncomingMessage, res: ServerResponse): Pro
   try {
     const payload = await readJson<VerifyRequest>(req)
     const guess = (payload.guess || '').trim()
-    const placeName = (payload.placeName || '').trim()
-    const placeAddress = (payload.placeAddress || '').trim()
-
-    if (guess.length < 3) {
-      send(res, 200, { match: false, reason: 'Three marks on the page, at least. The clerk will not file a shrug.' })
-      return true
-    }
-
-    if (guessFitsCase(guess, {
-      placeName,
-      address: placeAddress,
-      title: payload.title,
-      hints: payload.hints,
-    })) {
-      send(res, 200, { match: true })
-      return true
-    }
-
-    const { gemini } = apiKeys()
-    if (!gemini) {
-      send(res, 200, { match: false, reason: 'The ledgers do not agree. Look again, or name it more plainly.' })
-      return true
-    }
-
-    const judged = await askGeminiJson(
-      `You are the night clerk of MotME — Mystery of the Midnight Express, a 1930s detective-casebook.
-A traveler claims they have identified a real place. Be generous. Accept the identification if it is even vaguely correct or clearly related to THIS venue.
-
-True place name: ${placeName || 'not on the public docket — judge from the clues'}
-Address: ${placeAddress || 'unlisted'}
-City: ${[payload.city, payload.country].filter(Boolean).join(', ') || 'unlisted'}
-Case title (not the place name): ${payload.title || 'unlisted'}
-Clues already issued: ${(payload.hints || []).join(' | ') || 'none'}
-
-Traveler's identification:
-"""${guess}"""
-
-Match is TRUE when any of these hold:
-- official name, translation, nickname, abbreviation, or common misspelling
-- a distinctive part of the name (one clear word is enough: Rialto, Uffizi, Accademia, San Marco)
-- a description of this venue's function, look, age, or location that a local would connect to it
-- they named a real site in this city that fits the clues, if no official name is on the docket
-- they used a related type word that fits this file (the old bridge, the parish tower, the gallery) even if inexact
-
-Match is FALSE only when they named a different specific place, or the guess is empty of meaning ("something", "idk", the case title copied back with no place in it).
-
-Do not reveal the true name in your reason if match is false. Stay in period character. No modern app language.
-
-Return JSON only: { "match": true, "reason": "one short sentence" }`,
-      gemini,
-    )
 
     send(res, 200, {
-      match: Boolean(judged.match),
-      reason: typeof judged.reason === 'string' ? judged.reason : undefined,
+      match: Boolean(guess),
+      reason: guess ? undefined : 'The clerk needs something on the page before the wax can drop.',
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'The wire went dead.'
