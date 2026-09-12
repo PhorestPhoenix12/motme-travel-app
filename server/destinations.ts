@@ -3,7 +3,6 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { countryByCode, countryByName } from '../src/data/countries'
-import gazetteerData from '../src/data/cities-by-country.json'
 
 const CITY_TYPES = new Set([
   'locality',
@@ -69,13 +68,10 @@ let gazetteer: Record<string, string[]> | null = null
 
 function loadGazetteer() {
   if (gazetteer) return gazetteer
-  if (gazetteerData && typeof gazetteerData === 'object') {
-    gazetteer = gazetteerData as Record<string, string[]>
-    return gazetteer
-  }
-  const here = typeof import.meta.url === 'string' ? dirname(fileURLToPath(import.meta.url)) : process.cwd()
+  const here = dirname(fileURLToPath(import.meta.url))
   const candidates = [
     resolve(process.cwd(), 'src/data/cities-by-country.json'),
+    resolve(process.cwd(), 'public/data/cities-by-country.json'),
     join(here, '../src/data/cities-by-country.json'),
     join(here, '../../src/data/cities-by-country.json'),
   ]
@@ -515,7 +511,29 @@ async function handleResolve(body: SuggestBody, res: ServerResponse) {
       }
     }
   } catch {
-    // Google may refuse a lookup; the GeoNames ledger still files a known city.
+    // Google may refuse a lookup; Gemini and the GeoNames ledger still file a known city.
+  }
+
+  if (gemini && countryName && query.length >= MIN_QUERY) {
+    try {
+      const local = countryCode ? filterGazetteer(countryCode, query, 8) : []
+      const judged = await geminiConfirmCity(query, countryName, gemini, local)
+      if (judged.match && judged.city) {
+        const ledgerCountry = canonicalCountry(countryCode, countryName)
+        if (ledgerCountry) {
+          send(res, 200, {
+            destination: {
+              city: judged.city,
+              country: ledgerCountry.name,
+              countryCode: ledgerCountry.code,
+            },
+          })
+          return
+        }
+      }
+    } catch {
+      // Gemini may be dark; the gazetteer still files an exact city name.
+    }
   }
 
   const ledgerName = gazetteerCities(countryCode).find(name => name.toLowerCase() === query.toLowerCase())
@@ -569,7 +587,5 @@ export async function handleDestinationsApi(req: IncomingMessage, res: ServerRes
     const message = error instanceof Error ? error.message : 'The wire went dead.'
     send(res, 500, { error: message })
   }
-  return true
-}
   return true
 }

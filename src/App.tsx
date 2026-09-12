@@ -360,6 +360,8 @@ function NavTab({ active, onClick, children }: { active: boolean; onClick: () =>
    PAGE 1 — CHOOSE YOUR ROUTE
 ═══════════════════════════════════════════════════════════ */
 
+const CITY_MENU_LIMIT = 80
+
 function GooglePlacesMark() {
   return (
     <div className="px-3 py-1.5 flex justify-end" style={{ borderTop: '1px solid rgba(160,126,20,0.12)' }}>
@@ -466,9 +468,14 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
   const displayedCities = useMemo(() => {
     const q = city.trim().toLowerCase()
     const local = !q ? gazetteer : gazetteer.filter(item => item.city.toLowerCase().includes(q))
-    if (q.length < 2) return local
-    const seen = new Set(citySuggestions.map(item => item.city.toLowerCase()))
-    return [...citySuggestions, ...local.filter(item => !seen.has(item.city.toLowerCase()))]
+    const merged =
+      q.length < 2
+        ? local
+        : (() => {
+            const seen = new Set(citySuggestions.map(item => item.city.toLowerCase()))
+            return [...citySuggestions, ...local.filter(item => !seen.has(item.city.toLowerCase()))]
+          })()
+    return { items: merged.slice(0, CITY_MENU_LIMIT), total: merged.length }
   }, [city, gazetteer, citySuggestions])
 
   const selectCountry = (name: string, code?: string) => {
@@ -704,7 +711,7 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
                   }
                 }}
               />
-              {citySuggestionsVisible && !cityConfirmed && (displayedCities.length > 0 || cityBusy || cityNote) && (
+              {citySuggestionsVisible && !cityConfirmed && (displayedCities.total > 0 || cityBusy || cityNote) && (
                 <ul
                   className="departure-board absolute left-0 right-0 z-20 max-h-72 overflow-y-auto"
                   style={{ top: '100%', marginTop: 2 }}
@@ -713,10 +720,10 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
                 >
                   <div className="px-3 pt-2 pb-1 sticky top-0" style={{ background: '#070910', borderBottom: '1px solid rgba(160,126,20,0.15)' }}>
                     <span className="font-type" style={{ fontSize: 9, letterSpacing: '0.18em', color: 'var(--gold-dim)', textTransform: 'uppercase' }}>
-                      ── Departures from {country}{displayedCities.length > 0 ? ` · ${displayedCities.length}` : ''} ──
+                      ── Departures from {country}{displayedCities.total > 0 ? ` · ${displayedCities.total}` : ''} ──
                     </span>
                   </div>
-                  {displayedCities.map((item, index) => (
+                  {displayedCities.items.map((item, index) => (
                     <li
                       key={item.placeId || `${item.city}-${index}`}
                       className="departure-row px-4 py-2.5 cursor-pointer font-type text-sm flex items-center justify-between gap-3"
@@ -739,17 +746,22 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
                       <span style={{ fontSize: 9, color: 'var(--gold-dim)', flexShrink: 0 }}>BOARD →</span>
                     </li>
                   ))}
-                  {cityBusy && displayedCities.length === 0 && (
+                  {displayedCities.total > displayedCities.items.length && (
+                    <li className="px-4 py-2 font-type" style={{ fontSize: 10, letterSpacing: '0.08em', color: 'var(--gold-dim)' }}>
+                      Type the city you are visiting to narrow the board.
+                    </li>
+                  )}
+                  {cityBusy && displayedCities.total === 0 && (
                     <li className="px-4 py-2 font-type" style={{ fontSize: 10, letterSpacing: '0.12em', color: 'var(--gold-dim)' }}>
                       Checking the gazetteer…
                     </li>
                   )}
-                  {cityNote && !cityBusy && displayedCities.length === 0 && (
+                  {cityNote && !cityBusy && displayedCities.total === 0 && (
                     <li className="px-4 py-2 font-type" style={{ fontSize: 10, letterSpacing: '0.08em', color: 'rgba(200,180,140,0.7)' }}>
                       {cityNote}
                     </li>
                   )}
-                  {city.trim().length >= 2 && citySuggestions.length > 0 && <GooglePlacesMark />}
+                  {city.trim().length >= 2 && citySuggestions.some(item => item.placeId) && <GooglePlacesMark />}
                 </ul>
               )}
             </div>
