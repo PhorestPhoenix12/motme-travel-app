@@ -19,5 +19,5 @@
     "strict": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src", "server", "vite.config.ts", "drizzle.config.ts"]
+  "include": ["src", "server", "api", "vite.config.ts", "drizzle.config.ts"]
 }

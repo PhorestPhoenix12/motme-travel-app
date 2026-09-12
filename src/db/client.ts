@@ -1,11 +1,12 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { neon } from '@neondatabase/serverless'
 import { drizzle } from 'drizzle-orm/neon-http'
-import * as schema from './schema.ts'
 
 export function loadDotEnv(): Record<string, string> {
   const values: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === 'string' && value.length > 0) values[key] = value
+  }
   for (const file of ['.env.local', '.env']) {
     const full = resolve(process.cwd(), file)
     if (!existsSync(full)) continue
@@ -34,5 +35,5 @@ if (!databaseUrl) {
   throw new Error(`DATABASE_URL is not set (cwd=${process.cwd()} keys=${Object.keys(env).join(',')})`)
 }
 
-export const db = drizzle({ client: neon(databaseUrl), schema })
+export const db = drizzle(databaseUrl)
 export const clerkSecretKey = env['CLERK' + '_SECRET_KEY']

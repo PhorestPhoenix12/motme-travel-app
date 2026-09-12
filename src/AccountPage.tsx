@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, KeyboardEvent } from 'react'
 import { useUser, useClerk, useAuth, SignIn, SignUp } from '@clerk/clerk-react'
 import { loadProfileRemote, saveProfileRemote } from './lib/persist'
+import { createCitySession, resolveCity, suggestCities, type CitySuggestion } from './lib/destinations'
 
 /* ─── Interest taxonomy ─────────────────────────────────────────── */
 
@@ -186,62 +187,170 @@ function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
 
 function CityTagInput({ cities, onChange }: { cities: string[]; onChange: (c: string[]) => void }) {
   const [input, setInput] = useState('')
+  const [suggestions, setSuggestions] = useState<CitySuggestion[]>([])
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const session = useRef(createCitySession())
+  const ticket = useRef(0)
 
-  const addCity = () => {
-    const t = input.trim()
-    if (t && !cities.map(c => c.toLowerCase()).includes(t.toLowerCase())) {
-      onChange([...cities, t])
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false)
     }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  useEffect(() => {
+    const query = input.trim()
+    if (query.length < 2) {
+      setSuggestions([])
+      setBusy(false)
+      return
+    }
+    const controller = new AbortController()
+    const handle = window.setTimeout(async () => {
+      const id = ++ticket.current
+      setBusy(true)
+      try {
+        const next = await suggestCities({
+          query,
+          sessionToken: session.current.token,
+          signal: controller.signal,
+        })
+        if (id !== ticket.current) return
+        setSuggestions(next)
+        setOpen(true)
+      } catch {
+        if (!controller.signal.aborted && id === ticket.current) setSuggestions([])
+      } finally {
+        if (id === ticket.current) setBusy(false)
+      }
+    }, 280)
+    return () => {
+      controller.abort()
+      window.clearTimeout(handle)
+    }
+  }, [input])
+
+  const addLabel = (label: string) => {
+    const t = label.trim()
+    if (!t) return
+    if (!cities.map(c => c.toLowerCase()).includes(t.toLowerCase())) onChange([...cities, t])
     setInput('')
+    setSuggestions([])
+    setOpen(false)
+    session.current = createCitySession()
+  }
+
+  const boardSuggestion = async (suggestion?: CitySuggestion) => {
+    const typed = (suggestion?.city || input).trim()
+    if (typed.length < 2) return
+    setBusy(true)
+    const result = await resolveCity({
+      query: typed,
+      placeId: suggestion?.placeId,
+      sessionToken: session.current.token,
+    })
+    setBusy(false)
+    if ('destination' in result) {
+      addLabel(`${result.destination.city}, ${result.destination.country}`)
+      return
+    }
   }
 
   const removeCity = (city: string) => onChange(cities.filter(c => c !== city))
 
   const handleKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') { e.preventDefault(); addCity() }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const match = suggestions.length === 1
+        ? suggestions[0]
+        : suggestions.find(item => item.city.toLowerCase() === input.trim().toLowerCase())
+      void boardSuggestion(match)
+    }
     if (e.key === 'Backspace' && !input && cities.length > 0) removeCity(cities[cities.length - 1])
+    if (e.key === 'Escape') setOpen(false)
   }
 
   return (
-    <div
-      className="flex flex-wrap gap-2 items-center p-2 cursor-text"
-      style={{ border: '1px solid rgba(160,126,20,0.25)', background: 'rgba(11,13,28,0.7)', minHeight: 50 }}
-      onClick={() => inputRef.current?.focus()}
-    >
-      {cities.map(city => (
-        <span
-          key={city}
-          className="flex items-center gap-1.5 font-type"
-          style={{
-            fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase',
-            padding: '4px 8px 4px 10px',
-            background: 'rgba(124,27,44,0.22)',
-            border: '1px solid rgba(124,27,44,0.45)',
-            color: 'var(--cream)',
-          }}
-        >
-          {city}
-          <button
-            onClick={e => { e.stopPropagation(); removeCity(city) }}
-            aria-label={`Remove ${city}`}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(200,160,130,0.65)', fontSize: 14, lineHeight: 1, padding: 0 }}
+    <div ref={boxRef} className="relative">
+      <div
+        className="flex flex-wrap gap-2 items-center p-2 cursor-text"
+        style={{ border: '1px solid rgba(160,126,20,0.25)', background: 'rgba(11,13,28,0.7)', minHeight: 50 }}
+        onClick={() => inputRef.current?.focus()}
+      >
+        {cities.map(city => (
+          <span
+            key={city}
+            className="flex items-center gap-1.5 font-type"
+            style={{
+              fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase',
+              padding: '4px 8px 4px 10px',
+              background: 'rgba(124,27,44,0.22)',
+              border: '1px solid rgba(124,27,44,0.45)',
+              color: 'var(--cream)',
+            }}
           >
-            ×
-          </button>
-        </span>
-      ))}
-      <input
-        ref={inputRef}
-        value={input}
-        onChange={e => setInput(e.target.value)}
-        onKeyDown={handleKey}
-        onBlur={() => { if (input.trim()) addCity() }}
-        placeholder={cities.length === 0 ? 'Type a city and press Enter…' : 'Add another…'}
-        className="font-type"
-        style={{ flex: '1 1 140px', background: 'none', border: 'none', outline: 'none', color: 'var(--cream)', fontSize: 12, letterSpacing: '0.04em', padding: '4px' }}
-        aria-label="Add a visited city"
-      />
+            {city}
+            <button
+              onClick={e => { e.stopPropagation(); removeCity(city) }}
+              aria-label={`Remove ${city}`}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(200,160,130,0.65)', fontSize: 14, lineHeight: 1, padding: 0 }}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          ref={inputRef}
+          value={input}
+          onChange={e => { setInput(e.target.value); setOpen(true) }}
+          onKeyDown={handleKey}
+          onFocus={() => { if (suggestions.length > 0) setOpen(true) }}
+          placeholder={cities.length === 0 ? 'Type a recognized city…' : 'Add another…'}
+          className="font-type"
+          style={{ flex: '1 1 140px', background: 'none', border: 'none', outline: 'none', color: 'var(--cream)', fontSize: 12, letterSpacing: '0.04em', padding: '4px' }}
+          aria-label="Add a visited city"
+        />
+      </div>
+      {open && (suggestions.length > 0 || busy) && input.trim().length > 1 && (
+        <ul
+          className="departure-board absolute left-0 right-0 z-20"
+          style={{ top: '100%', marginTop: 2 }}
+          role="listbox"
+          aria-label="Recognized cities"
+        >
+          {suggestions.map(item => (
+            <li
+              key={item.placeId}
+              className="departure-row px-4 py-2 cursor-pointer font-type text-sm"
+              style={{ color: 'rgba(200,185,145,0.85)', letterSpacing: '0.06em' }}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => void boardSuggestion(item)}
+              role="option"
+              aria-selected={false}
+            >
+              {item.city}
+              {item.secondary && (
+                <span style={{ display: 'block', fontSize: 9, color: 'rgba(160,140,100,0.55)' }}>{item.secondary}</span>
+              )}
+            </li>
+          ))}
+          {busy && (
+            <li className="px-4 py-2 font-type" style={{ fontSize: 10, letterSpacing: '0.12em', color: 'var(--gold-dim)' }}>
+              Checking the gazetteer…
+            </li>
+          )}
+          <div className="px-3 py-1.5 flex justify-end" style={{ borderTop: '1px solid rgba(160,126,20,0.12)' }}>
+            <span className="font-type" style={{ fontSize: 8, letterSpacing: '0.16em', color: 'rgba(160,140,100,0.45)', textTransform: 'uppercase' }}>
+              Powered by Google
+            </span>
+          </div>
+        </ul>
+      )}
     </div>
   )
 }
@@ -453,7 +562,7 @@ function ProfileForm({ initialData, emailReadonly, avatarUrl, memberSince, onSav
       {/* Visited cities */}
       <SectionLabel>Field Record — Cities Visited</SectionLabel>
       <p className="font-body mb-3" style={{ fontSize: 14, color: 'rgba(200,180,140,0.5)', fontStyle: 'italic', lineHeight: 1.5 }}>
-        Every city you have investigated, on record. Type a name and press Enter.
+        Every city you have investigated, on record. Search any recognized city; the clerk files only those Google and the ledgers can confirm.
       </p>
       <CityTagInput cities={form.visitedCities} onChange={cities => set('visitedCities', cities)} />
       {form.visitedCities.length > 0 && (

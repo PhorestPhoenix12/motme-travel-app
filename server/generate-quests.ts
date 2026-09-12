@@ -15,6 +15,9 @@ try {
 
 function loadEnv() {
   const values: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === 'string' && value.length > 0) values[key] = value
+  }
   for (const file of ['.env.local', '.env']) {
     const full = resolve(process.cwd(), file)
     if (!existsSync(full)) continue
@@ -69,6 +72,8 @@ type PlaceCandidate = {
   rating: number | null
   ratings: number
   primaryType: string
+  lat?: number
+  lng?: number
 }
 
 type GeneratedQuest = {
@@ -85,6 +90,10 @@ const INTEREST_QUERY_VARIANTS: Record<string, Array<(city: string, country: stri
     (city, country) => `famous landmarks monuments and historic sites in ${city}, ${country}`,
     (city, country) => `lesser known historic sites and local monuments in ${city}, ${country}`,
     (city, country) => `viewpoints bridges fountains and civic landmarks in ${city}, ${country}`,
+    (city, country) => `statues squares and public memorials in ${city}, ${country}`,
+    (city, country) => `old town walls gates and historic towers in ${city}, ${country}`,
+    (city, country) => `waterfront landmarks and lookout points in ${city}, ${country}`,
+    (city, country) => `quiet neighborhood landmarks away from tourist squares in ${city}, ${country}`,
   ],
   Food: [
     (city, country) => `iconic local restaurants historic cafes and regional cuisine in ${city}, ${country}`,
@@ -92,32 +101,59 @@ const INTEREST_QUERY_VARIANTS: Record<string, Array<(city: string, country: stri
     (city, country) => `bakeries pastry shops and breakfast rooms in ${city}, ${country}`,
     (city, country) => `street food wine bars and casual regional cooking in ${city}, ${country}`,
     (city, country) => `fine dining and chef-driven restaurants in ${city}, ${country}`,
+    (city, country) => `seafood market kitchens and cicchetti bacari in ${city}, ${country}`,
+    (city, country) => `quiet residential district restaurants away from tourist squares in ${city}, ${country}`,
   ],
   Museums: [
     (city, country) => `museums galleries and cultural archives in ${city}, ${country}`,
     (city, country) => `smaller house museums and specialist collections in ${city}, ${country}`,
     (city, country) => `art galleries and historic libraries in ${city}, ${country}`,
+    (city, country) => `science history and design museums in ${city}, ${country}`,
+    (city, country) => `palace museums and civic collections in ${city}, ${country}`,
+    (city, country) => `neighborhood galleries away from the main museum district in ${city}, ${country}`,
   ],
   Nature: [
     (city, country) => `parks gardens riversides and scenic green spaces in ${city}, ${country}`,
     (city, country) => `quiet gardens botanical collections and hidden courtyards in ${city}, ${country}`,
     (city, country) => `waterfront walks hills and nature reserves in ${city}, ${country}`,
+    (city, country) => `tree-lined promenades and public gardens in ${city}, ${country}`,
+    (city, country) => `islands lagoons and waterside parks in ${city}, ${country}`,
+    (city, country) => `small neighborhood parks away from the main tourist garden in ${city}, ${country}`,
   ],
   Nightlife: [
     (city, country) => `historic bars cocktail lounges cabarets and nightlife in ${city}, ${country}`,
     (city, country) => `neighborhood wine bars and late cafes in ${city}, ${country}`,
     (city, country) => `jazz clubs speakeasies and old taverns in ${city}, ${country}`,
+    (city, country) => `canal-side or courtyard aperitivo bars in ${city}, ${country}`,
+    (city, country) => `historic pubs and local drinking rooms in ${city}, ${country}`,
+    (city, country) => `quiet evening cafes away from the main nightlife strip in ${city}, ${country}`,
   ],
   Architecture: [
     (city, country) => `historic architecture palaces churches and notable buildings in ${city}, ${country}`,
     (city, country) => `art nouveau palazzi and hidden courtyards in ${city}, ${country}`,
     (city, country) => `civic halls libraries and remarkable facades in ${city}, ${country}`,
+    (city, country) => `chapels cloisters and lesser known churches in ${city}, ${country}`,
+    (city, country) => `bridges staircases and remarkable public works in ${city}, ${country}`,
+    (city, country) => `quiet palazzi away from the main square in ${city}, ${country}`,
   ],
   Shopping: [
     (city, country) => `historic markets bazaars shopping streets and covered passages in ${city}, ${country}`,
     (city, country) => `local food markets and artisan stalls in ${city}, ${country}`,
     (city, country) => `bookshops antique streets and independent shops in ${city}, ${country}`,
+    (city, country) => `covered galleries and historic shopping arcades in ${city}, ${country}`,
+    (city, country) => `craft workshops and specialty food shops in ${city}, ${country}`,
+    (city, country) => `neighborhood markets away from the main tourist street in ${city}, ${country}`,
   ],
+}
+
+const INCLUDED_TYPES: Record<string, string[]> = {
+  Landmarks: ['tourist_attraction', 'church', 'city_hall'],
+  Food: ['restaurant', 'cafe', 'bakery'],
+  Museums: ['museum', 'art_gallery', 'library'],
+  Nature: ['park', 'zoo', 'campground'],
+  Nightlife: ['bar', 'night_club', 'liquor_store'],
+  Architecture: ['church', 'city_hall', 'university'],
+  Shopping: ['book_store', 'clothing_store', 'shopping_mall'],
 }
 
 const COMMON_WORDS = new Set([
@@ -163,6 +199,87 @@ function apiKeys() {
   return { gemini, places }
 }
 
+function foldName(text: string) {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\b(the|and|of|de|di|da|del|della|il|la|le|los|las|el)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function isSamePlace(a: PlaceCandidate, b: PlaceCandidate) {
+  if (a.id && b.id && a.id === b.id) return true
+  const na = foldName(a.name)
+  const nb = foldName(b.name)
+  if (na && na === nb) return true
+  const streetA = foldName((a.address || '').split(',')[0] || '')
+  const streetB = foldName((b.address || '').split(',')[0] || '')
+  if (na && nb && streetA && streetA === streetB && Math.min(na.length, nb.length) >= 8) {
+    if (na.includes(nb) || nb.includes(na)) return true
+  }
+  return false
+}
+
+const CITY_ALIASES: Record<string, string[]> = {
+  venice: ['venezia'],
+  florence: ['firenze'],
+  rome: ['roma'],
+  milan: ['milano'],
+  naples: ['napoli'],
+  turin: ['torino'],
+  munich: ['munchen', 'muenchen'],
+  vienna: ['wien'],
+  prague: ['praha'],
+  cologne: ['koln', 'koeln'],
+  seville: ['sevilla'],
+  brussels: ['bruxelles', 'brussel'],
+  geneva: ['geneve'],
+  copenhagen: ['kobenhavn'],
+  warsaw: ['warszawa'],
+  krakow: ['cracow'],
+  cracow: ['krakow'],
+}
+
+function belongsToDestination(
+  place: PlaceCandidate,
+  city: string,
+  country: string,
+  bias?: { lat: number; lng: number } | null,
+) {
+  const hay = foldName(`${place.address || ''} ${place.name || ''}`)
+  const cityFold = foldName(city)
+  if (cityFold && hay.includes(cityFold)) return true
+  if ((CITY_ALIASES[cityFold] || []).some(alias => hay.includes(alias))) return true
+  if (bias && typeof place.lat === 'number' && typeof place.lng === 'number') {
+    const km = distanceKm(bias.lat, bias.lng, place.lat, place.lng)
+    if (km <= 22) return true
+  }
+  return false
+}
+
+function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number) {
+  const toRad = (deg: number) => (deg * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLng = toRad(lng2 - lng1)
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+function uniquePlaces(places: PlaceCandidate[]) {
+  const out: PlaceCandidate[] = []
+  for (const place of places) {
+    if (out.some(existing => isSamePlace(existing, place))) continue
+    out.push(place)
+  }
+  return out
+}
+
 function usedPlaceNames(prior: PriorCase[]) {
   return new Set(
     prior
@@ -170,6 +287,16 @@ function usedPlaceNames(prior: PriorCase[]) {
       .filter((value): value is string => Boolean(value && value.trim()))
       .map(value => value.trim().toLowerCase()),
   )
+}
+
+function matchesUsedPlace(place: PlaceCandidate, used: Set<string>, already: PlaceCandidate[]) {
+  if (used.has(place.name.toLowerCase())) return true
+  if (used.has(foldName(place.name))) return true
+  if (already.some(item => isSamePlace(item, place))) return true
+  for (const value of used) {
+    if (foldName(value) && foldName(value) === foldName(place.name)) return true
+  }
+  return false
 }
 
 function placeTypesOf(item: { types?: string[]; placeTypes?: string[]; primaryType?: string }) {
@@ -226,29 +353,40 @@ function pickPlaces(
   already: PlaceCandidate[],
 ) {
   const used = usedPlaceNames(prior)
-  for (const place of already) used.add(place.name.toLowerCase())
-  const pool = candidates.filter(place => !used.has(place.name.toLowerCase()))
+  const pool = uniquePlaces(candidates).filter(place => !matchesUsedPlace(place, used, already))
   const picked: PlaceCandidate[] = []
-  const remaining = pool.slice()
-  while (picked.length < count && remaining.length > 0) {
+
+  const take = (strict: boolean) => {
+    const remaining = pool.filter(place => !picked.some(item => isSamePlace(item, place)))
     remaining.sort(
       (a, b) =>
         scorePlace(b, category, prior, [...already, ...picked]) -
         scorePlace(a, category, prior, [...already, ...picked]),
     )
-    const next = remaining.shift()
-    if (!next || scorePlace(next, category, prior, [...already, ...picked]) < -50) continue
-    picked.push(next)
+    for (const next of remaining) {
+      if (picked.length >= count) return
+      if (scorePlace(next, category, prior, [...already, ...picked]) < -50) continue
+      if (strict) {
+        const hood = neighborhoodOf(next.address)
+        if (hood && hood.length > 4 && picked.some(item => neighborhoodOf(item.address) === hood)) continue
+      }
+      picked.push(next)
+    }
   }
+
+  take(true)
+  if (picked.length < count) take(false)
   return picked
 }
 
-function queriesFor(category: string, city: string, country: string, prior: PriorCase[]) {
+function queriesFor(category: string, city: string, country: string, prior: PriorCase[], count = 1) {
   const variants = INTEREST_QUERY_VARIANTS[category] || INTEREST_QUERY_VARIANTS.Landmarks
   const loved = prior.filter(item => item.category === category && item.liked === true)
   const passed = prior.filter(item => item.category === category && item.liked === false)
   const start = passed.length > loved.length ? 1 : 0
-  const chosen = variants.slice(start, start + 3)
+  const chosen = count > 1
+    ? variants.slice()
+    : variants.slice(start, start + 3)
   if (chosen.length < 2 && variants.length > 1) chosen.push(variants[variants.length - 1])
   return chosen.map(build => build(city, country))
 }
@@ -286,16 +424,30 @@ function extractJson(text: string) {
   return JSON.parse(raw.slice(start, end + 1))
 }
 
-async function searchPlacesNew(query: string, apiKey: string): Promise<PlaceCandidate[]> {
+async function searchPlacesNew(
+  query: string,
+  apiKey: string,
+  options?: { includedType?: string; bias?: { lat: number; lng: number } | null },
+): Promise<PlaceCandidate[]> {
+  const payload: Record<string, unknown> = { textQuery: query, languageCode: 'en', pageSize: 20 }
+  if (options?.includedType) payload.includedType = options.includedType
+  if (options?.bias) {
+    payload.locationBias = {
+      circle: {
+        center: { latitude: options.bias.lat, longitude: options.bias.lng },
+        radius: 18000,
+      },
+    }
+  }
   const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-Goog-Api-Key': apiKey,
       'X-Goog-FieldMask':
-        'places.id,places.displayName,places.formattedAddress,places.types,places.editorialSummary,places.rating,places.userRatingCount,places.primaryType,places.generativeSummary',
+        'places.id,places.displayName,places.formattedAddress,places.types,places.editorialSummary,places.rating,places.userRatingCount,places.primaryType,places.generativeSummary,places.location',
     },
-    body: JSON.stringify({ textQuery: query, languageCode: 'en', pageSize: 20 }),
+    body: JSON.stringify(payload),
   })
   if (!res.ok) {
     const detail = await res.text()
@@ -312,6 +464,7 @@ async function searchPlacesNew(query: string, apiKey: string): Promise<PlaceCand
       rating?: number
       userRatingCount?: number
       primaryType?: string
+      location?: { latitude?: number; longitude?: number }
     }>
   }
   return (data.places ?? []).map(place => ({
@@ -323,6 +476,8 @@ async function searchPlacesNew(query: string, apiKey: string): Promise<PlaceCand
     rating: place.rating ?? null,
     ratings: place.userRatingCount ?? 0,
     primaryType: place.primaryType || '',
+    lat: place.location?.latitude,
+    lng: place.location?.longitude,
   }))
 }
 
@@ -359,25 +514,45 @@ async function searchPlacesLegacy(query: string, apiKey: string): Promise<PlaceC
   }))
 }
 
-async function findPlaces(query: string, apiKey: string) {
+async function findPlaces(
+  query: string,
+  apiKey: string,
+  bias?: { lat: number; lng: number } | null,
+) {
   try {
-    const latest = await searchPlacesNew(query, apiKey)
+    const latest = await searchPlacesNew(query, apiKey, { bias })
     if (latest.length > 0) return latest
   } catch {
     // Fall through to the classic Places Text Search.
   }
-  return searchPlacesLegacy(query, apiKey)
+  try {
+    return await searchPlacesLegacy(query, apiKey)
+  } catch {
+    return []
+  }
+}
+
+async function geocodeCity(city: string, country: string, apiKey: string) {
+  const hits = await searchPlacesNew(`${city}, ${country}`, apiKey).catch(() => [])
+  const hit = hits.find(place => typeof place.lat === 'number' && typeof place.lng === 'number')
+  if (!hit || hit.lat == null || hit.lng == null) return null
+  return { lat: hit.lat, lng: hit.lng }
 }
 
 function fallbackQuest(category: string, place: PlaceCandidate, city: string): GeneratedQuest {
-  const district = place.address.split(',').slice(0, 2).join(', ')
+  const district = place.address.split(',').slice(0, 2).join(', ').trim() || 'an unlisted quarter'
+  const street = place.address.split(',')[0]?.trim() || district
   const material = place.types.includes('church') || place.types.includes('place_of_worship')
     ? 'stone that has heard more confessions than trains'
     : place.types.includes('park')
       ? 'a hush of leaves where the city pretends to forget itself'
-      : place.types.includes('restaurant') || place.types.includes('cafe')
+      : place.types.includes('restaurant') || place.types.includes('cafe') || place.types.includes('bakery')
         ? 'an aroma the locals follow without looking at a map'
-        : 'a silhouette that has outlived several timetables'
+        : place.types.includes('bar') || place.types.includes('night_club')
+          ? 'lamplight and the last pour of the evening'
+          : place.types.includes('museum') || place.types.includes('art_gallery')
+            ? 'rooms that keep hours the railway never learned'
+            : 'a silhouette that has outlived several timetables'
   const titleByCategory: Record<string, string> = {
     Landmarks: 'The Sentinel That Keeps the Hour',
     Food: "The Ledger of Salt and Smoke",
@@ -389,14 +564,52 @@ function fallbackQuest(category: string, place: PlaceCandidate, city: string): G
   }
   return {
     category,
-    title: `${titleByCategory[category] || 'The File Without a Cover'}${district ? ` — ${district.split(',')[0]}` : ''}`,
+    title: `${titleByCategory[category] || 'The File Without a Cover'} — ${street}`,
     place_name: place.name,
-    clue: `The Midnight Express does not deliver you to a name. In ${city}, follow ${material}. Word among the porters is that the truth sits where the old city still bothers to dress for evening.`,
-    default_hint: `Narrow your search toward ${district || 'the quarter the guidebooks mention second'}. Those who keep regular hours pass it without looking up; those who arrive off the night train feel it before they see it.`,
+    clue: `The Midnight Express does not deliver you to a name. In ${city}, follow ${material} toward ${street}. Word among the porters is that this file, unlike the others, sits in ${district}.`,
+    default_hint: `Narrow your search toward ${district}. Those who keep regular hours pass it without looking up; those who arrive off the night train feel it before they see it. Do not confuse it with another door already named in this briefing.`,
     bonus_hint: place.summary
-      ? redactName(`Confirm the site by this field note, stripped of its proper name: ${place.summary} If a plaque or worn threshold agrees, you have the right door.`, place.name)
-      : `Stand where the light falls most severely. Count what the builders repeated — arches, windows, or steps. The number will not be fashionable. File what you find.`,
+      ? redactName(`Confirm the site by this field note, stripped of its proper name: ${place.summary} If a plaque or worn threshold agrees, you have the right door — the one in ${street}.`, place.name)
+      : `Stand where the light falls most severely at ${street}. Count what the builders repeated — arches, windows, or steps. The number will not be fashionable. File what you find.`,
   }
+}
+
+function ensureDistinctQuests(quests: GeneratedQuest[]): GeneratedQuest[] {
+  const kept: GeneratedQuest[] = []
+  const venues = new Set<string>()
+  const titles = new Set<string>()
+  const clues = new Set<string>()
+
+  for (const quest of quests) {
+    const venue = foldName(quest.place_name) || foldName(quest.title)
+    if (venue && venues.has(venue)) continue
+    if (venue) venues.add(venue)
+
+    const street = (quest.place_address || '').split(',')[0]?.trim() || quest.place_name
+    let title = quest.title
+    let titleKey = foldName(title)
+    if (!titleKey || titles.has(titleKey)) {
+      title = `${title.replace(/ — .*$/, '')} — ${street}`
+      titleKey = foldName(title)
+    }
+    titles.add(titleKey)
+
+    let clue = quest.clue
+    let clueKey = foldName(clue)
+    if (!clueKey || clues.has(clueKey)) {
+      clue = `${clue} This briefing concerns ${street}; the other files aboard this train lead elsewhere.`
+      clueKey = foldName(clue)
+    }
+    clues.add(clueKey)
+
+    let hint = quest.default_hint
+    if (kept.some(item => foldName(item.default_hint) === foldName(hint))) {
+      hint = `${hint} Stay with ${street}.`
+    }
+
+    kept.push({ ...quest, title, clue, default_hint: hint })
+  }
+  return kept
 }
 
 function buildPrompt(
@@ -437,7 +650,8 @@ Fields of inquiry: ${interests.join(', ')}.
 Prior case reactions — lean toward what they loved. If they passed / disliked a trail, do not repeat that venue, neighborhood, or the same kind of place:
 ${priorLines}
 
-Write one case for each of the following real places. You know the true name. The player must not.
+Write one distinct case for each of the following real places. You know the true name. The player must not.
+If several belong to the same specialty, they are still SEPARATE files: different venue, different quarter, different title, different clues. A traveler who solved one must not be able to use that walk to close another.
 
 ${placeLines}
 
@@ -521,16 +735,26 @@ function polishQuests(
   generated: GeneratedQuest[],
   selected: Array<PlaceCandidate & { category: string }>,
 ) {
+  const usedTitles = new Set<string>()
   return selected.map(place => {
     const index = selected.indexOf(place)
     const match =
-      generated.find(quest => quest.place_name.toLowerCase() === place.name.toLowerCase()) ||
+      generated.find(quest => foldName(quest.place_name) === foldName(place.name)) ||
       generated[index] ||
       fallbackQuest(place.category, place, '')
-    const title = redactName(match.title, place.name)
+    let title = redactName(match.title, place.name)
+    if (title.toLowerCase() === place.name.toLowerCase()) {
+      title = fallbackQuest(place.category, place, '').title
+    }
+    const folded = foldName(title)
+    if (!folded || usedTitles.has(folded)) {
+      const district = place.address.split(',')[0]?.trim()
+      title = district ? `${title.replace(/ — .*$/, '')} — ${district}` : `${title} ${index + 1}`
+    }
+    usedTitles.add(foldName(title))
     return {
       category: place.category,
-      title: title.toLowerCase() === place.name.toLowerCase() ? fallbackQuest(place.category, place, '').title : title,
+      title,
       place_name: place.name,
       place_address: place.address,
       place_types: place.types,
@@ -702,29 +926,47 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
       return true
     }
 
+    const totalCases = interests.reduce((sum, interest) => sum + (counts[interest] || 1), 0)
+    const spread = totalCases > 1
+    const bias = await geocodeCity(city, country, placesKey)
+
     const selected: Array<PlaceCandidate & { category: string }> = []
     const searchResults = await Promise.all(
       interests.map(async interest => {
-        const queries = queriesFor(interest, city, country, priorCases)
-        const batches = await Promise.all(queries.map(query => findPlaces(query, placesKey)))
-        const found: PlaceCandidate[] = []
-        const seen = new Set<string>()
-        for (const batch of batches) {
-          for (const place of batch) {
-            const key = place.name.toLowerCase()
-            if (seen.has(key)) continue
-            seen.add(key)
-            found.push(place)
-          }
-        }
-        return { interest, found }
+        const needed = counts[interest] || 1
+        const queries = queriesFor(interest, city, country, priorCases, spread ? Math.max(needed, 2) : needed)
+        const typed = spread
+          ? (INCLUDED_TYPES[interest] || []).map(type =>
+              searchPlacesNew(
+                `${type.replace(/_/g, ' ')}s in ${city}, ${country}`,
+                placesKey,
+                { includedType: type, bias },
+              ).catch(() => []),
+            )
+          : []
+        const batches = await Promise.all([
+          ...queries.map(query => findPlaces(query, placesKey, bias)),
+          ...typed,
+        ])
+        const merged = uniquePlaces(batches.flat())
+        const local = merged.filter(place => belongsToDestination(place, city, country, bias))
+        const found = local.length > 0 ? local : merged
+        return { interest, found, needed }
       }),
     )
 
-    for (const { interest, found } of searchResults) {
-      const chosen = pickPlaces(found, interest, priorCases, counts[interest] || 1, selected)
+    for (const { interest, found, needed } of searchResults) {
+      const chosen = pickPlaces(found, interest, priorCases, needed, selected)
       for (const place of chosen) selected.push({ ...place, category: interest })
     }
+
+    const uniqueSelected: Array<PlaceCandidate & { category: string }> = []
+    for (const place of selected) {
+      if (uniqueSelected.some(item => isSamePlace(item, place))) continue
+      uniqueSelected.push(place)
+    }
+    selected.length = 0
+    selected.push(...uniqueSelected)
 
     if (selected.length === 0) {
       send(res, 502, { error: 'The field office found no venues in that city.' })
@@ -747,6 +989,16 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
     } else {
       quests = selected.map(place => fallbackQuest(place.category, place, city))
     }
+
+    const seenVenues = new Set<string>()
+    quests = ensureDistinctQuests(
+      quests.filter(quest => {
+        const key = foldName(quest.place_name) || foldName(quest.title)
+        if (!key || seenVenues.has(key)) return false
+        seenVenues.add(key)
+        return true
+      }),
+    )
 
     send(res, 200, { quests })
   } catch (error) {

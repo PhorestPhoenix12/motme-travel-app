@@ -1,10 +1,12 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { UserButton, useAuth, useUser } from '@clerk/clerk-react'
 import AccountPage from './AccountPage'
 import AlbumPage from './AlbumPage'
 import IntroPage, { AuthGateSplash } from './IntroPage'
+import { countryByName } from './data/countries'
 import { guessMatchesPlace } from './lib/identify'
 import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, persistTrip, secretForQuest, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
+import { createCitySession, listCities, resolveCity, searchCountries, suggestCities, type CitySuggestion } from './lib/destinations'
 
 const CLERK_ENABLED = Boolean(import.meta.env.VITE_CLERK_PUBLISHABLE_KEY)
 
@@ -36,35 +38,6 @@ interface Quest {
 /* ═══════════════════════════════════════════════════════════
    DATA
 ═══════════════════════════════════════════════════════════ */
-
-const COUNTRIES = [
-  'Austria', 'Belgium', 'Bulgaria', 'Croatia', 'Czechia',
-  'France', 'Germany', 'Greece', 'Hungary', 'Italy', 'Montenegro',
-  'Poland', 'Romania', 'Serbia', 'Slovakia', 'Slovenia',
-  'Switzerland', 'Turkey', 'United Kingdom',
-]
-
-const CITIES: Record<string, string[]> = {
-  Austria: ['Vienna', 'Salzburg', 'Innsbruck', 'Graz'],
-  Belgium: ['Brussels', 'Bruges', 'Ghent', 'Antwerp'],
-  Bulgaria: ['Sofia', 'Plovdiv', 'Varna', 'Ruse'],
-  Croatia: ['Zagreb', 'Split', 'Dubrovnik', 'Rijeka'],
-  Czechia: ['Prague', 'Brno', 'Ostrava', 'Olomouc'],
-  France: ['Paris', 'Lyon', 'Marseille', 'Nice', 'Bordeaux', 'Strasbourg'],
-  Germany: ['Berlin', 'Munich', 'Hamburg', 'Cologne', 'Frankfurt', 'Dresden'],
-  Greece: ['Athens', 'Thessaloniki', 'Heraklion', 'Rhodes'],
-  Hungary: ['Budapest', 'Debrecen', 'Pécs', 'Győr'],
-  Italy: ['Venice', 'Rome', 'Florence', 'Milan', 'Naples', 'Bologna'],
-  Montenegro: ['Kotor', 'Podgorica', 'Budva', 'Herceg Novi'],
-  Poland: ['Warsaw', 'Kraków', 'Gdańsk', 'Wrocław', 'Poznań'],
-  Romania: ['Bucharest', 'Cluj-Napoca', 'Timișoara', 'Brașov', 'Sibiu'],
-  Serbia: ['Belgrade', 'Novi Sad', 'Niš', 'Subotica'],
-  Slovakia: ['Bratislava', 'Košice', 'Prešov', 'Žilina'],
-  Slovenia: ['Ljubljana', 'Maribor', 'Bled', 'Piran'],
-  Switzerland: ['Zurich', 'Geneva', 'Bern', 'Basel', 'Lucerne'],
-  Turkey: ['Istanbul', 'Ankara', 'Izmir', 'Bursa', 'Antalya'],
-  'United Kingdom': ['London', 'Edinburgh', 'Oxford', 'Bath', 'York', 'Bristol'],
-}
 
 const MAX_CASES_PER_CATEGORY = 10
 const MAX_CASES_PER_DOSSIER = 20
@@ -140,14 +113,18 @@ const QUEST_TEMPLATES: Record<Interest, { title: string; hints: string[] }> = {
 
 function buildQuests(interests: Interest[], counts?: Record<Interest, number>): Quest[] {
   const list: Quest[] = []
+  const trails = ['the northeast approach', 'the canal-side lane', 'the hill above the station', 'the market quarter', 'the old walls', 'the far bridge', 'the quieter sestiere', 'the garden edge', 'the last café before the depot', 'the courtyard behind the laundry']
   for (const interest of interests) {
     const n = Math.max(1, counts?.[interest] ?? 1)
     for (let copy = 0; copy < n; copy += 1) {
+      const trail = trails[copy % trails.length]
       list.push({
         id: `q${list.length}`,
         category: interest,
-        title: n > 1 ? `${QUEST_TEMPLATES[interest].title} — ${copy + 1}` : QUEST_TEMPLATES[interest].title,
-        hints: QUEST_TEMPLATES[interest].hints,
+        title: n > 1 ? `${QUEST_TEMPLATES[interest].title} — ${trail}` : QUEST_TEMPLATES[interest].title,
+        hints: QUEST_TEMPLATES[interest].hints.map(hint =>
+          n === 1 ? hint : `${hint} This file follows ${trail}; it is not the same walk as the other ${interest.toLowerCase()} cases.`,
+        ),
         unlockedHints: 1,
         solved: false,
         photoUrl: null,
@@ -179,8 +156,9 @@ async function buildQuestsFromApi(
   }
 
   const data = await response.json()
+  const seen = new Set<string>()
 
-  return data.quests.map((q: {
+  return (data.quests as Array<{
     category: Interest
     title?: string
     place_name?: string
@@ -190,7 +168,17 @@ async function buildQuestsFromApi(
     default_hint?: string
     bonus_hint?: string
     hints?: string[]
-  }, i: number) => ({
+  }>).filter(q => {
+    const venue = (q.place_name || '').trim().toLowerCase()
+    const title = (q.title || '').trim().toLowerCase()
+    const clue = (q.clue || q.hints?.[0] || '').trim().toLowerCase()
+    const key = venue || `${title}|${clue}`
+    if (!key || seen.has(key)) return false
+    if (title && seen.has(`title:${title}`)) return false
+    seen.add(key)
+    if (title) seen.add(`title:${title}`)
+    return true
+  }).map((q, i) => ({
     id: `q${i}`,
     category: q.category as Interest,
     title: q.title || 'The File Without a Cover',
@@ -372,48 +360,165 @@ function NavTab({ active, onClick, children }: { active: boolean; onClick: () =>
    PAGE 1 — CHOOSE YOUR ROUTE
 ═══════════════════════════════════════════════════════════ */
 
+function GooglePlacesMark() {
+  return (
+    <div className="px-3 py-1.5 flex justify-end" style={{ borderTop: '1px solid rgba(160,126,20,0.12)' }}>
+      <span className="font-type" style={{ fontSize: 8, letterSpacing: '0.16em', color: 'rgba(160,140,100,0.45)', textTransform: 'uppercase' }}>
+        Powered by Google
+      </span>
+    </div>
+  )
+}
+
 function RoutePage({ onBegin }: { onBegin: (country: string, city: string, interests: Interest[], counts: Record<Interest, number>) => void }) {
   const [country, setCountry] = useState('')
+  const [countryCode, setCountryCode] = useState('')
   const [countrySearch, setCountrySearch] = useState('')
   const [countryOpen, setCountryOpen] = useState(false)
   const [city, setCity] = useState('')
   const [cityConfirmed, setCityConfirmed] = useState(false)
+  const [citySuggestions, setCitySuggestions] = useState<CitySuggestion[]>([])
+  const [gazetteer, setGazetteer] = useState<CitySuggestion[]>([])
   const [citySuggestionsVisible, setCitySuggestionsVisible] = useState(false)
+  const [cityBusy, setCityBusy] = useState(false)
+  const [cityNote, setCityNote] = useState('')
   const [interests, setInterests] = useState<Set<Interest>>(new Set())
   const [counts, setCounts] = useState<Partial<Record<Interest, number>>>({})
   const countryRef = useRef<HTMLDivElement>(null)
+  const cityBoxRef = useRef<HTMLDivElement>(null)
   const cityRef = useRef<HTMLInputElement>(null)
+  const citySession = useRef(createCitySession())
+  const cityQueryRef = useRef(0)
 
-  const filteredCountries = COUNTRIES.filter(c =>
-    c.toLowerCase().includes(countrySearch.toLowerCase())
-  )
-  const citySuggestions = country ? (CITIES[country] || []).filter(c =>
-    c.toLowerCase().includes(city.toLowerCase())
-  ) : []
+  const filteredCountries = searchCountries(countrySearch)
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (countryRef.current && !countryRef.current.contains(e.target as Node)) {
         setCountryOpen(false)
       }
+      if (cityBoxRef.current && !cityBoxRef.current.contains(e.target as Node)) {
+        setCitySuggestionsVisible(false)
+      }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  const selectCountry = (c: string) => {
-    setCountry(c)
-    setCountrySearch(c)
+  useEffect(() => {
+    if (!countryCode) {
+      setGazetteer([])
+      return
+    }
+    const controller = new AbortController()
+    setCityBusy(true)
+    listCities(countryCode, controller.signal)
+      .then(cities => {
+        if (controller.signal.aborted) return
+        setGazetteer(cities)
+        setCityNote(cities.length === 0 ? 'The gazetteer has no recognized cities for this territory.' : '')
+      })
+      .catch(error => {
+        if (controller.signal.aborted) return
+        setGazetteer([])
+        setCityNote(error instanceof Error ? error.message : 'The gazetteer could not be opened.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCityBusy(false)
+      })
+    return () => controller.abort()
+  }, [countryCode])
+
+  useEffect(() => {
+    if (!countryCode || cityConfirmed || city.trim().length < 2) {
+      setCitySuggestions([])
+      return
+    }
+    const query = city.trim()
+    const controller = new AbortController()
+    const handle = window.setTimeout(async () => {
+      const ticket = ++cityQueryRef.current
+      setCityBusy(true)
+      try {
+        const next = await suggestCities({
+          query,
+          countryCode,
+          sessionToken: citySession.current.token,
+          signal: controller.signal,
+        })
+        if (ticket !== cityQueryRef.current) return
+        setCitySuggestions(next)
+        setCityNote(next.length === 0 ? 'No recognized city matches yet. Keep typing, or press Enter to have the clerk check the ledgers.' : '')
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setCitySuggestions([])
+        setCityNote(error instanceof Error ? error.message : 'The wire to the gazetteer went quiet.')
+      } finally {
+        if (ticket === cityQueryRef.current) setCityBusy(false)
+      }
+    }, 280)
+    return () => {
+      controller.abort()
+      window.clearTimeout(handle)
+    }
+  }, [city, cityConfirmed, countryCode])
+
+  const displayedCities = useMemo(() => {
+    const q = city.trim().toLowerCase()
+    const local = !q ? gazetteer : gazetteer.filter(item => item.city.toLowerCase().includes(q))
+    if (q.length < 2) return local
+    const seen = new Set(citySuggestions.map(item => item.city.toLowerCase()))
+    return [...citySuggestions, ...local.filter(item => !seen.has(item.city.toLowerCase()))]
+  }, [city, gazetteer, citySuggestions])
+
+  const selectCountry = (name: string, code?: string) => {
+    const record = countryByName(name)
+    setCountry(record?.name || name)
+    setCountryCode((code || record?.code || '').toUpperCase())
+    setCountrySearch(record?.name || name)
     setCountryOpen(false)
     setCity('')
     setCityConfirmed(false)
+    setCitySuggestions([])
+    setCityNote('')
+    setCitySuggestionsVisible(true)
+    citySession.current = createCitySession()
     setTimeout(() => cityRef.current?.focus(), 80)
   }
 
-  const confirmCity = (c: string) => {
-    setCity(c)
+  const confirmCity = (name: string) => {
+    setCity(name)
     setCityConfirmed(true)
     setCitySuggestionsVisible(false)
+    setCityNote('')
+    setCityBusy(false)
+    citySession.current = createCitySession()
+  }
+
+  const boardCity = async (suggestion?: CitySuggestion) => {
+    const typed = (suggestion?.city || city).trim()
+    if (typed.length < 2 || !country) return
+    setCityBusy(true)
+    setCityNote('The clerk is checking the gazetteer…')
+    const result = await resolveCity({
+      query: typed,
+      placeId: suggestion?.placeId,
+      countryCode,
+      countryName: country,
+      sessionToken: citySession.current.token,
+    })
+    setCityBusy(false)
+    if ('destination' in result) {
+      confirmCity(result.destination.city)
+      if (result.destination.country && result.destination.country !== country) {
+        setCountry(result.destination.country)
+        setCountrySearch(result.destination.country)
+        setCountryCode(result.destination.countryCode)
+      }
+      return
+    }
+    setCityConfirmed(false)
+    setCityNote(result.error)
   }
 
   const selectedInterests = Array.from(interests)
@@ -516,7 +621,16 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
               }}
               onKeyDown={e => {
                 if (e.key === 'Escape') setCountryOpen(false)
-                if (e.key === 'Enter' && filteredCountries.length === 1) selectCountry(filteredCountries[0])
+                if (e.key === 'Enter') {
+                  const typed = countrySearch.trim().toLowerCase()
+                  const exact = filteredCountries.find(item =>
+                    item.name.toLowerCase() === typed ||
+                    item.code.toLowerCase() === typed ||
+                    (item.aliases || []).some(alias => alias.toLowerCase() === typed),
+                  )
+                  if (exact) selectCountry(exact.name, exact.code)
+                  else if (filteredCountries.length === 1) selectCountry(filteredCountries[0].name, filteredCountries[0].code)
+                }
               }}
             />
             <div
@@ -532,19 +646,19 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
                 role="listbox"
                 aria-label="Country options"
               >
-                {filteredCountries.map(c => (
+                {filteredCountries.map(item => (
                   <li
-                    key={c}
+                    key={item.code}
                     className="departure-row px-4 py-2 cursor-pointer font-type text-sm"
-                    style={{ color: c === country ? 'var(--gold-light)' : 'rgba(200,185,145,0.85)', letterSpacing: '0.06em' }}
-                    onClick={() => selectCountry(c)}
+                    style={{ color: item.name === country ? 'var(--gold-light)' : 'rgba(200,185,145,0.85)', letterSpacing: '0.06em' }}
+                    onClick={() => selectCountry(item.name, item.code)}
                     role="option"
-                    aria-selected={c === country}
+                    aria-selected={item.name === country}
                     tabIndex={0}
-                    onKeyDown={e => e.key === 'Enter' && selectCountry(c)}
+                    onKeyDown={e => e.key === 'Enter' && selectCountry(item.name, item.code)}
                   >
-                    {c === country && <span style={{ marginRight: 8, color: 'var(--gold)' }}>→</span>}
-                    {c}
+                    {item.name === country && <span style={{ marginRight: 8, color: 'var(--gold)' }}>→</span>}
+                    {item.name}
                   </li>
                 ))}
               </ul>
@@ -558,7 +672,7 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
             <label className="font-type block mb-2" style={{ fontSize: 10, letterSpacing: '0.2em', color: 'var(--gold-dim)', textTransform: 'uppercase' }}>
               Destination
             </label>
-            <div className="relative">
+            <div ref={cityBoxRef} className="relative">
               <input
                 ref={cityRef}
                 type="text"
@@ -569,7 +683,7 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
                   setCitySuggestionsVisible(true)
                 }}
                 onFocus={() => setCitySuggestionsVisible(true)}
-                placeholder="Enter city or town…"
+                placeholder="Enter any recognized city or town…"
                 autoComplete="off"
                 className="w-full font-type px-4 py-3 text-sm"
                 style={{
@@ -582,41 +696,68 @@ function RoutePage({ onBegin }: { onBegin: (country: string, city: string, inter
                 onKeyDown={e => {
                   if (e.key === 'Escape') setCitySuggestionsVisible(false)
                   if (e.key === 'Enter' && city.trim().length > 1) {
-                    const match = citySuggestions.length === 1 ? citySuggestions[0] : city.trim()
-                    confirmCity(match)
+                    e.preventDefault()
+                    const match = citySuggestions.length === 1
+                      ? citySuggestions[0]
+                      : citySuggestions.find(item => item.city.toLowerCase() === city.trim().toLowerCase())
+                    void boardCity(match)
                   }
                 }}
               />
-              {citySuggestionsVisible && citySuggestions.length > 0 && city.length > 0 && (
+              {citySuggestionsVisible && !cityConfirmed && (displayedCities.length > 0 || cityBusy || cityNote) && (
                 <ul
-                  className="departure-board absolute left-0 right-0 z-20"
+                  className="departure-board absolute left-0 right-0 z-20 max-h-72 overflow-y-auto"
                   style={{ top: '100%', marginTop: 2 }}
                   role="listbox"
                   aria-label="City suggestions"
                 >
-                  <div className="px-3 pt-2 pb-1" style={{ borderBottom: '1px solid rgba(160,126,20,0.15)' }}>
+                  <div className="px-3 pt-2 pb-1 sticky top-0" style={{ background: '#070910', borderBottom: '1px solid rgba(160,126,20,0.15)' }}>
                     <span className="font-type" style={{ fontSize: 9, letterSpacing: '0.18em', color: 'var(--gold-dim)', textTransform: 'uppercase' }}>
-                      ── Departures from {country} ──
+                      ── Departures from {country}{displayedCities.length > 0 ? ` · ${displayedCities.length}` : ''} ──
                     </span>
                   </div>
-                  {citySuggestions.map(c => (
+                  {displayedCities.map((item, index) => (
                     <li
-                      key={c}
-                      className="departure-row px-4 py-2.5 cursor-pointer font-type text-sm flex items-center justify-between"
+                      key={item.placeId || `${item.city}-${index}`}
+                      className="departure-row px-4 py-2.5 cursor-pointer font-type text-sm flex items-center justify-between gap-3"
                       style={{ color: 'rgba(200,185,145,0.85)', letterSpacing: '0.08em' }}
-                      onClick={() => confirmCity(c)}
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => void boardCity(item)}
                       role="option"
                       aria-selected={false}
                       tabIndex={0}
-                      onKeyDown={e => e.key === 'Enter' && confirmCity(c)}
+                      onKeyDown={e => e.key === 'Enter' && void boardCity(item)}
                     >
-                      <span>{c}</span>
-                      <span style={{ fontSize: 9, color: 'var(--gold-dim)' }}>BOARD →</span>
+                      <span>
+                        {item.city}
+                        {item.secondary && (
+                          <span style={{ display: 'block', fontSize: 9, letterSpacing: '0.06em', color: 'rgba(160,140,100,0.55)' }}>
+                            {item.secondary}
+                          </span>
+                        )}
+                      </span>
+                      <span style={{ fontSize: 9, color: 'var(--gold-dim)', flexShrink: 0 }}>BOARD →</span>
                     </li>
                   ))}
+                  {cityBusy && displayedCities.length === 0 && (
+                    <li className="px-4 py-2 font-type" style={{ fontSize: 10, letterSpacing: '0.12em', color: 'var(--gold-dim)' }}>
+                      Checking the gazetteer…
+                    </li>
+                  )}
+                  {cityNote && !cityBusy && displayedCities.length === 0 && (
+                    <li className="px-4 py-2 font-type" style={{ fontSize: 10, letterSpacing: '0.08em', color: 'rgba(200,180,140,0.7)' }}>
+                      {cityNote}
+                    </li>
+                  )}
+                  {city.trim().length >= 2 && citySuggestions.length > 0 && <GooglePlacesMark />}
                 </ul>
               )}
             </div>
+            {cityNote && (cityConfirmed === false) && city.trim().length > 1 && !citySuggestionsVisible && (
+              <p className="font-type mt-2" style={{ fontSize: 10, letterSpacing: '0.08em', color: 'rgba(200,180,140,0.65)' }}>
+                {cityNote}
+              </p>
+            )}
           </div>
         )}
 

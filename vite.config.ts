@@ -35,6 +35,7 @@ export default defineConfig(({ mode }) => {
       figmaMakeKitPlugin({ storiesGlob: '/src/**/*.stories.{ts,tsx,js,jsx}' }),
       motmePersistApi(),
       motmeQuestApi(),
+      motmeDestinationsApi(),
     ],
     resolve: {
       alias: {
@@ -50,6 +51,9 @@ export default defineConfig(({ mode }) => {
           '**/.figma/**',
           '**/.env',
           '**/.env.*',
+          '**/.tmp-*/**',
+          '**/.tmp-*',
+          '**/.vercel/**',
         ],
       },
     },
@@ -92,6 +96,25 @@ function motmePersistApi(): Plugin {
   )
   return {
     name: 'motme-persist-api',
+    configureServer(server) {
+      server.middlewares.use(middleware)
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(middleware)
+    },
+  }
+}
+
+function motmeDestinationsApi(): Plugin {
+  const middleware = mountApi(
+    url => url.split('?')[0] === '/api/destinations',
+    async () => {
+      const { handleDestinationsApi } = await import('./server/destinations.ts')
+      return handleDestinationsApi
+    },
+  )
+  return {
+    name: 'motme-destinations-api',
     configureServer(server) {
       server.middlewares.use(middleware)
     },
