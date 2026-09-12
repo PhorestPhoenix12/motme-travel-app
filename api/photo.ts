@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { withApiPath } from './_lib/node-api'
 
 export const config = { maxDuration: 30 }
 
@@ -12,12 +11,13 @@ function fail(res: ServerResponse, error: unknown) {
 
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   try {
-    const incoming = withApiPath(req, '/api/photo')
-    const url = new URL(incoming.url || '/api/photo', 'http://localhost')
+    const raw = req.url || '/api/photo'
+    const url = new URL(raw, 'http://localhost')
     const key = url.searchParams.get('k') || ''
     if (!key) {
       res.statusCode = 400
       res.setHeader('Content-Type', 'application/json')
+      res.setHeader('Cache-Control', 'no-store')
       res.end(JSON.stringify({ error: 'Invalid photograph key' }))
       return
     }
