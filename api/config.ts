@@ -7,7 +7,7 @@ export default function handler(_req: IncomingMessage, res: ServerResponse) {
     process.env.VITE_CLERK_PUBLISHABLE_KEY ||
     process.env.CLERK_PUBLISHABLE_KEY ||
     process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY ||
-    ''
+    'pk_test_d2hvbGUtc2tpbmstMjk3MS5jbGVyay5hY2NvdW50cy5kZXYk'
   ).trim()
 
   res.statusCode = 200
