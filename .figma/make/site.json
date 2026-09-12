@@ -1,0 +1,10 @@
+{
+  "description": "Embark on a detective-style scavenger hunt in real cities, uncovering clues and documenting your journey through an immersive travel experience.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
