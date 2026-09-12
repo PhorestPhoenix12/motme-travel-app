@@ -1,9 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { and, desc, eq } from 'drizzle-orm'
 import { verifyToken } from '@clerk/backend'
-import { clerkSecretKey, db } from '../src/db/client.ts'
-import { profiles, questRecords, trips } from '../src/db/schema.ts'
-import { albumPhotoKey, isDataUrl, signedPhotoUrl, uploadDataUrl } from './storage.ts'
+import { clerkSecretKey, db } from '../src/db/client'
+import { profiles, questRecords, trips } from '../src/db/schema'
+import { albumPhotoKey, isDataUrl, signedPhotoUrl, uploadDataUrl } from './storage'
 
 type QuestPayload = {
   id: string
@@ -120,7 +120,11 @@ async function serializeTrip(trip: typeof trips.$inferSelect) {
 }
 
 export async function handlePersistApi(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
-  const url = new URL(req.url || '/', 'http://localhost')
+  const url = new URL(req.url || '/api/me/', 'http://localhost')
+  if (!url.pathname.startsWith('/api/me')) {
+    url.pathname = `/api/me${url.pathname.startsWith('/') ? url.pathname : `/${url.pathname}`}`
+  }
+  if (url.pathname === '/api/me') url.pathname = '/api/me/'
   if (!url.pathname.startsWith('/api/me/')) return false
 
   const userId = await clerkUserId(req)

@@ -30,10 +30,7 @@ export function loadDotEnv(): Record<string, string> {
 }
 
 const env = loadDotEnv()
-const databaseUrl = env['DATABASE' + '_URL']
-if (!databaseUrl) {
-  throw new Error(`DATABASE_URL is not set (cwd=${process.cwd()} keys=${Object.keys(env).join(',')})`)
-}
+const databaseUrl = env['DATABASE' + '_URL'] || 'postgresql://localhost/postgres'
 
 export const db = drizzle(databaseUrl)
 export const clerkSecretKey = env['CLERK' + '_SECRET_KEY']

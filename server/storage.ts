@@ -1,6 +1,6 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
-import { loadDotEnv } from '../src/db/client.ts'
+import { loadDotEnv } from '../src/db/client'
 
 const BUCKET = 'pictures'
 

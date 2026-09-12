@@ -23,3 +23,7 @@ logs/
 
 .vercel
 .tmp-*
+dest.json
+quest.json
+api/**/*.js
+api/**/*.ts.bak

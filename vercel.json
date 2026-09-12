@@ -2,10 +2,29 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
   "installCommand": "npm install",
-  "buildCommand": "node scripts/bundle-vercel-api.mjs && npm run build",
+  "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/**/*.ts": {
+    "api/health.ts": {
+      "maxDuration": 10
+    },
+    "api/destinations.ts": {
+      "maxDuration": 60,
+      "includeFiles": "src/data/cities-by-country.json"
+    },
+    "api/generate-quests.ts": {
+      "maxDuration": 60
+    },
+    "api/verify-guess.ts": {
+      "maxDuration": 60
+    },
+    "api/me/profile.ts": {
+      "maxDuration": 60
+    },
+    "api/me/trips.ts": {
+      "maxDuration": 60
+    },
+    "api/me/trip.ts": {
       "maxDuration": 60
     }
   }

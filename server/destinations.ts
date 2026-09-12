@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { resolve } from 'node:path'
-import { countryByCode, countryByName } from '../src/data/countries.ts'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { countryByCode, countryByName } from '../src/data/countries'
 
 const CITY_TYPES = new Set([
   'locality',
@@ -67,8 +68,18 @@ let gazetteer: Record<string, string[]> | null = null
 
 function loadGazetteer() {
   if (gazetteer) return gazetteer
-  const full = resolve(process.cwd(), 'src/data/cities-by-country.json')
-  gazetteer = existsSync(full) ? (JSON.parse(readFileSync(full, 'utf8')) as Record<string, string[]>) : {}
+  const here = dirname(fileURLToPath(import.meta.url))
+  const candidates = [
+    resolve(process.cwd(), 'src/data/cities-by-country.json'),
+    join(here, '../src/data/cities-by-country.json'),
+    join(here, '../../src/data/cities-by-country.json'),
+  ]
+  for (const full of candidates) {
+    if (!existsSync(full)) continue
+    gazetteer = JSON.parse(readFileSync(full, 'utf8')) as Record<string, string[]>
+    return gazetteer
+  }
+  gazetteer = {}
   return gazetteer
 }
 

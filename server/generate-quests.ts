@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import tls from 'node:tls'
-import { guessMatchesPlace } from '../src/lib/identify.ts'
+import { guessMatchesPlace } from '../src/lib/identify'
 
 try {
   tls.setDefaultCACertificates([
