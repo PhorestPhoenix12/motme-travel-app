@@ -117,7 +117,7 @@ function motmePublicConfigApi(): Plugin {
 
 function motmePersistApi(): Plugin {
   const middleware = mountApi(
-    url => url.startsWith('/api/me/'),
+    url => url.startsWith('/api/me/') || url.split('?')[0] === '/api/photo',
     async () => {
       const { handlePersistApi } = await import('./server/persist-api.ts')
       return handlePersistApi

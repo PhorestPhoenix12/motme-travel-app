@@ -1281,6 +1281,7 @@ function PhotoCard({ quest, rotation, accent, noteSticker, fontSize = 13 }: {
   noteSticker?: Sticker | null
   fontSize?: number
 }) {
+  const [broken, setBroken] = useState(false)
   const caption = quest.note
     ? `"${quest.note.slice(0, 68)}${quest.note.length > 68 ? '…' : ''}"`
     : quest.title
@@ -1315,10 +1316,11 @@ function PhotoCard({ quest, rotation, accent, noteSticker, fontSize = 13 }: {
 
         {/* Photo area — flexes to fill everything above caption mat */}
         <div style={{ flex: 1, position: 'relative', overflow: 'hidden', minHeight: 0 }}>
-          {quest.photoUrl ? (
+          {quest.photoUrl && !broken ? (
             <img
               src={quest.photoUrl}
               alt={quest.title}
+              onError={() => setBroken(true)}
               style={{
                 width: '100%', height: '100%',
                 objectFit: 'cover',

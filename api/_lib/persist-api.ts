@@ -1,9 +1,19 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { and, desc, eq } from 'drizzle-orm'
+import { and, desc, eq, notInArray } from 'drizzle-orm'
 import { verifyToken } from '@clerk/backend'
 import { clerkSecretKey, db } from '../../src/db/client'
 import { profiles, questRecords, trips } from '../../src/db/schema'
-import { albumPhotoKey, isDataUrl, signedPhotoUrl, uploadDataUrl } from './storage'
+import {
+  albumPhotoKey,
+  dataUrlToBuffer,
+  getPhotoBytes,
+  hasObjectStorage,
+  isDataUrl,
+  isSafeAlbumKey,
+  photoKeyFromUrl,
+  photoProxyPath,
+  uploadDataUrl,
+} from './storage'
 
 type QuestPayload = {
   id: string
@@ -33,6 +43,8 @@ type TripPayload = {
   quests: QuestPayload[]
 }
 
+const MAX_INLINE_PHOTO = 180_000
+
 function send(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status
   res.setHeader('Content-Type', 'application/json')
@@ -40,17 +52,23 @@ function send(res: ServerResponse, status: number, body: unknown) {
 }
 
 async function readJson<T>(req: IncomingMessage): Promise<T> {
+  const preloaded = (req as IncomingMessage & { body?: unknown }).body
+  if (typeof preloaded === 'string' && preloaded.length > 0) return JSON.parse(preloaded) as T
+  if (preloaded && typeof preloaded === 'object') return preloaded as T
+
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += buf.length
-    if (size > 12 * 1024 * 1024) {
+    if (size > 4.5 * 1024 * 1024) {
       throw new Error('Payload too large')
     }
     chunks.push(buf)
   }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T
+  const raw = Buffer.concat(chunks).toString('utf8')
+  if (!raw) throw new Error('Empty request body')
+  return JSON.parse(raw) as T
 }
 
 async function clerkUserId(req: IncomingMessage): Promise<string | null> {
@@ -65,25 +83,29 @@ async function clerkUserId(req: IncomingMessage): Promise<string | null> {
   }
 }
 
-async function questsWithSignedPhotos(
-  tripId: string,
-  records: (typeof questRecords.$inferSelect)[],
-) {
-  return Promise.all(
-    records.map(async record => ({
-      id: record.questKey,
-      category: record.category,
-      title: record.title,
-      hints: record.hints,
-      unlockedHints: record.unlockedHints,
-      solved: record.solved,
-      photoUrl: record.photoKey ? await signedPhotoUrl(record.photoKey) : record.photoData,
-      photoKey: record.photoKey,
-      note: record.note,
-      liked: record.liked,
-      tripId,
-    })),
-  )
+async function storePhoto(key: string, dataUrl: string) {
+  if (hasObjectStorage()) {
+    const uploaded = await uploadDataUrl(key, dataUrl)
+    if (uploaded) return { photoKey: key, photoData: null as string | null }
+  }
+  return {
+    photoKey: key,
+    photoData: dataUrl.length <= MAX_INLINE_PHOTO ? dataUrl : null,
+  }
+}
+
+async function questsWithPhotos(records: (typeof questRecords.$inferSelect)[]) {
+  return records.map(record => ({
+    id: record.questKey,
+    category: record.category,
+    title: record.title,
+    hints: record.hints,
+    unlockedHints: record.unlockedHints,
+    solved: record.solved,
+    photoUrl: record.photoKey ? photoProxyPath(record.photoKey) : record.photoData,
+    note: record.note,
+    liked: record.liked,
+  }))
 }
 
 async function rememberDestination(userId: string, country: string, city: string) {
@@ -115,12 +137,52 @@ async function serializeTrip(trip: typeof trips.$inferSelect) {
     country: trip.country,
     city: trip.city,
     keys: trip.keys,
-    quests: await questsWithSignedPhotos(trip.id, records),
+    quests: await questsWithPhotos(records),
   }
 }
 
+async function servePhoto(key: string, res: ServerResponse) {
+  if (!isSafeAlbumKey(key)) {
+    send(res, 400, { error: 'Invalid photograph key' })
+    return
+  }
+
+  if (hasObjectStorage()) {
+    try {
+      const object = await getPhotoBytes(key)
+      if (object) {
+        res.statusCode = 200
+        res.setHeader('Content-Type', object.contentType)
+        res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800')
+        res.end(object.body)
+        return
+      }
+    } catch {
+      // Fall through to database copies.
+    }
+  }
+
+  const rows = await db.select().from(questRecords).where(eq(questRecords.photoKey, key))
+  const inline = rows[0]?.photoData ? dataUrlToBuffer(rows[0].photoData) : null
+  if (inline) {
+    res.statusCode = 200
+    res.setHeader('Content-Type', inline.contentType)
+    res.setHeader('Cache-Control', 'private, max-age=3600')
+    res.end(inline.body)
+    return
+  }
+
+  send(res, 404, { error: 'Photograph not found' })
+}
+
 export async function handlePersistApi(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
-  const url = new URL(req.url || '/api/me/', 'http://localhost')
+  const url = new URL(req.url || '/', 'http://localhost')
+  const photoPath = url.pathname === '/api/photo' || url.pathname === '/photo'
+  if (photoPath && (req.method === 'GET' || req.method === 'HEAD')) {
+    await servePhoto(url.searchParams.get('k') || '', res)
+    return true
+  }
+
   if (!url.pathname.startsWith('/api/me')) {
     url.pathname = `/api/me${url.pathname.startsWith('/') ? url.pathname : `/${url.pathname}`}`
   }
@@ -134,6 +196,26 @@ export async function handlePersistApi(req: IncomingMessage, res: ServerResponse
   }
 
   try {
+    if (url.pathname === '/api/me/photo' && (req.method === 'PUT' || req.method === 'POST')) {
+      const data = await readJson<{ country: string; city: string; questId: string; dataUrl: string }>(req)
+      if (!data.country || !data.city || !data.questId || !isDataUrl(data.dataUrl)) {
+        send(res, 400, { error: 'Photograph payload is incomplete' })
+        return true
+      }
+      const photoKey = albumPhotoKey(userId, data.country, data.city, data.questId)
+      try {
+        const stored = await storePhoto(photoKey, data.dataUrl)
+        send(res, 200, {
+          photoUrl: stored.photoData ? stored.photoData : photoProxyPath(photoKey),
+          photoKey,
+          stored: true,
+        })
+      } catch {
+        send(res, 200, { photoUrl: data.dataUrl, photoKey: null, stored: false })
+      }
+      return true
+    }
+
     if (url.pathname === '/api/me/profile' && req.method === 'GET') {
       const [row] = await db.select().from(profiles).where(eq(profiles.clerkUserId, userId))
       send(res, 200, row ?? null)
@@ -210,18 +292,29 @@ export async function handlePersistApi(req: IncomingMessage, res: ServerResponse
 
       const existing = await db.select().from(questRecords).where(eq(questRecords.tripId, trip.id))
       const existingByKey = new Map(existing.map(record => [record.questKey, record]))
+      const incomingKeys = data.quests.map(quest => quest.id)
 
-      await db.delete(questRecords).where(eq(questRecords.tripId, trip.id))
       if (data.quests.length > 0) {
         const rows = []
         for (const quest of data.quests) {
           const previous = existingByKey.get(quest.id)
-          let photoKey = previous?.photoKey ?? null
+          let photoKey = previous?.photoKey ?? photoKeyFromUrl(quest.photoUrl)
+          let photoData = previous?.photoData ?? null
           if (isDataUrl(quest.photoUrl)) {
             photoKey = albumPhotoKey(userId, data.country, data.city, quest.id)
-            await uploadDataUrl(photoKey, quest.photoUrl!)
+            try {
+              const stored = await storePhoto(photoKey, quest.photoUrl!)
+              photoKey = stored.photoKey
+              photoData = stored.photoData
+            } catch {
+              photoKey = previous?.photoKey ?? null
+              photoData = quest.photoUrl!.length <= MAX_INLINE_PHOTO ? quest.photoUrl : previous?.photoData ?? null
+            }
           } else if (!quest.photoUrl) {
             photoKey = null
+            photoData = null
+          } else {
+            photoData = photoKey ? null : photoData
           }
           rows.push({
             tripId: trip.id,
@@ -232,12 +325,36 @@ export async function handlePersistApi(req: IncomingMessage, res: ServerResponse
             unlockedHints: quest.unlockedHints,
             solved: quest.solved,
             photoKey,
-            photoData: null,
+            photoData,
             note: quest.note,
             liked: quest.liked,
           })
         }
-        await db.insert(questRecords).values(rows)
+        for (const row of rows) {
+          await db
+            .insert(questRecords)
+            .values(row)
+            .onConflictDoUpdate({
+              target: [questRecords.tripId, questRecords.questKey],
+              set: {
+                category: row.category,
+                title: row.title,
+                hints: row.hints,
+                unlockedHints: row.unlockedHints,
+                solved: row.solved,
+                photoKey: row.photoKey,
+                photoData: row.photoData,
+                note: row.note,
+                liked: row.liked,
+              },
+            })
+        }
+      }
+
+      if (incomingKeys.length === 0) {
+        await db.delete(questRecords).where(eq(questRecords.tripId, trip.id))
+      } else {
+        await db.delete(questRecords).where(and(eq(questRecords.tripId, trip.id), notInArray(questRecords.questKey, incomingKeys)))
       }
 
       await rememberDestination(userId, data.country, data.city)

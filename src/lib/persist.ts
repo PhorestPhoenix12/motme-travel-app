@@ -119,8 +119,53 @@ export function loadTripLocal(): StoredTrip | null {
   }
 }
 
+function slimTripForLocal(trip: StoredTrip): StoredTrip {
+  return {
+    ...trip,
+    quests: trip.quests.map(quest => ({
+      ...quest,
+      photoUrl:
+        quest.photoUrl && quest.photoUrl.startsWith('data:') && quest.photoUrl.length > 350_000
+          ? null
+          : quest.photoUrl,
+    })),
+  }
+}
+
 export function saveTripLocal(trip: StoredTrip) {
-  localStorage.setItem(TRIP_KEY, JSON.stringify(trip))
+  const slim = slimTripForLocal(trip)
+  try {
+    localStorage.setItem(TRIP_KEY, JSON.stringify(slim))
+  } catch {
+    try {
+      localStorage.setItem(
+        TRIP_KEY,
+        JSON.stringify({
+          ...slim,
+          quests: slim.quests.map(quest => ({
+            ...quest,
+            photoUrl: quest.photoUrl?.startsWith('data:') ? null : quest.photoUrl,
+          })),
+        }),
+      )
+    } catch {
+      // Browser storage is full; remote persist can still keep the album.
+    }
+  }
+}
+
+export function mergeTripPhotos(remote: StoredTrip, local: StoredTrip | null): StoredTrip {
+  if (!local || local.city !== remote.city || local.country !== remote.country) return remote
+  const byId = new Map(local.quests.map(quest => [quest.id, quest]))
+  return {
+    ...remote,
+    quests: remote.quests.map(quest => {
+      const previous = byId.get(quest.id)
+      if (previous?.photoUrl?.startsWith('data:')) return { ...quest, photoUrl: previous.photoUrl }
+      if (quest.photoUrl) return quest
+      return previous?.photoUrl ? { ...quest, photoUrl: previous.photoUrl } : quest
+    }),
+  }
 }
 
 async function authHeaders(token: string | null): Promise<HeadersInit> {
@@ -144,12 +189,41 @@ export async function loadAllTripsRemote(token: string | null): Promise<StoredTr
 
 export async function saveTripRemote(token: string | null, trip: StoredTrip): Promise<boolean> {
   if (!token) return false
+  const payload: StoredTrip = {
+    ...trip,
+    quests: trip.quests.map(quest => ({
+      ...quest,
+      photoUrl:
+        quest.photoUrl?.startsWith('data:') && quest.photoUrl.length > 900_000
+          ? null
+          : quest.photoUrl,
+    })),
+  }
   const res = await fetch('/api/me/trip', {
     method: 'PUT',
     headers: await authHeaders(token),
-    body: JSON.stringify(trip),
+    body: JSON.stringify(payload),
   })
   return res.ok
+}
+
+export async function uploadQuestPhoto(
+  token: string | null,
+  payload: { country: string; city: string; questId: string; dataUrl: string },
+): Promise<{ photoUrl: string; photoKey: string | null } | null> {
+  if (!token || !payload.dataUrl.startsWith('data:')) return null
+  try {
+    const res = await fetch('/api/me/photo', {
+      method: 'PUT',
+      headers: await authHeaders(token),
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as { photoUrl?: string; photoKey?: string | null }
+    return data.photoUrl ? { photoUrl: data.photoUrl, photoKey: data.photoKey ?? null } : null
+  } catch {
+    return null
+  }
 }
 
 export async function loadProfileRemote(token: string | null): Promise<StoredProfile | null> {
@@ -171,31 +245,64 @@ export async function saveProfileRemote(token: string | null, profile: StoredPro
 
 export function persistTrip(token: string | null, trip: StoredTrip) {
   saveTripLocal(trip)
-  void saveTripRemote(token, trip)
+  void saveTripRemote(token, trip).catch(() => false)
 }
 
-export function fileToCompressedDataUrl(file: File, max = 1200, quality = 0.72): Promise<string> {
+export function fileToCompressedDataUrl(file: File, max = 960, quality = 0.68): Promise<string> {
   return new Promise((resolve, reject) => {
-    const img = new Image()
-    const objectUrl = URL.createObjectURL(file)
-    img.onload = () => {
-      let { width, height } = img
-      if (width > max || height > max) {
-        const scale = max / Math.max(width, height)
-        width = Math.round(width * scale)
-        height = Math.round(height * scale)
+    const fail = () =>
+      reject(new Error('Could not read that photograph. Try a JPEG or PNG from the camera roll.'))
+
+    const draw = (source: CanvasImageSource, width: number, height: number, close?: () => void) => {
+      let nextWidth = width
+      let nextHeight = height
+      if (nextWidth > max || nextHeight > max) {
+        const scale = max / Math.max(nextWidth, nextHeight)
+        nextWidth = Math.round(nextWidth * scale)
+        nextHeight = Math.round(nextHeight * scale)
       }
       const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-      canvas.getContext('2d')!.drawImage(img, 0, 0, width, height)
-      URL.revokeObjectURL(objectUrl)
-      resolve(canvas.toDataURL('image/jpeg', quality))
+      canvas.width = nextWidth
+      canvas.height = nextHeight
+      const context = canvas.getContext('2d')
+      if (!context) {
+        fail()
+        return
+      }
+      context.drawImage(source, 0, 0, nextWidth, nextHeight)
+      close?.()
+      const dataUrl = canvas.toDataURL('image/jpeg', quality)
+      if (!dataUrl.startsWith('data:image')) fail()
+      else resolve(dataUrl)
     }
-    img.onerror = () => {
-      URL.revokeObjectURL(objectUrl)
-      reject(new Error('Could not read photo'))
+
+    const loadThroughImage = () => {
+      const img = new Image()
+      const objectUrl = URL.createObjectURL(file)
+      img.onload = () => {
+        URL.revokeObjectURL(objectUrl)
+        draw(img, img.naturalWidth || img.width, img.naturalHeight || img.height)
+      }
+      img.onerror = () => {
+        URL.revokeObjectURL(objectUrl)
+        if ((file.type === 'image/jpeg' || file.type === 'image/png' || file.type === 'image/webp') && file.size < 1_200_000) {
+          const reader = new FileReader()
+          reader.onload = () => (typeof reader.result === 'string' ? resolve(reader.result) : fail())
+          reader.onerror = fail
+          reader.readAsDataURL(file)
+        } else {
+          fail()
+        }
+      }
+      img.src = objectUrl
     }
-    img.src = objectUrl
+
+    if (typeof createImageBitmap === 'function') {
+      createImageBitmap(file, { imageOrientation: 'from-image' } as ImageBitmapOptions)
+        .then(bitmap => draw(bitmap, bitmap.width, bitmap.height, () => bitmap.close()))
+        .catch(loadThroughImage)
+    } else {
+      loadThroughImage()
+    }
   })
 }

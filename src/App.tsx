@@ -6,7 +6,7 @@ import IntroPage, { AuthGateSplash, ClerkIntroPage } from './IntroPage'
 import { countryByName } from './data/countries'
 import { QUEST_VARIANTS } from './data/quest-variants'
 import { guessFitsCase } from './lib/identify'
-import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, persistTrip, secretForQuest, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
+import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, mergeTripPhotos, persistTrip, secretForQuest, uploadQuestPhoto, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
 import { createCitySession, listCities, resolveCity, searchCountries, suggestCities, type CitySuggestion } from './lib/destinations'
 
 /* ═══════════════════════════════════════════════════════════
@@ -873,6 +873,7 @@ function CasesPage({
   city,
   country,
   keys,
+  getToken,
   onUpdateQuest,
   onEarnKeys,
   onSpendKey,
@@ -881,6 +882,7 @@ function CasesPage({
   city: string
   country: string
   keys: number
+  getToken: () => Promise<string | null>
   onUpdateQuest: (id: string, update: Partial<Quest>) => void
   onEarnKeys: (n: number) => void
   onSpendKey: (questId: string) => void
@@ -892,8 +894,10 @@ function CasesPage({
   const [modalLiked, setModalLiked] = useState<boolean | null>(null)
   const [modalError, setModalError] = useState<string | null>(null)
   const [sealing, setSealing] = useState(false)
+  const [photoBusy, setPhotoBusy] = useState(false)
   const [telegram, setTelegram] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const photoUploadRef = useRef<Promise<string | null> | null>(null)
 
   const solvedCount = quests.filter(q => q.solved).length
 
@@ -915,13 +919,23 @@ function CasesPage({
     setModalLiked(null)
     setModalError(null)
     setSealing(false)
+    photoUploadRef.current = null
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const handleSealCase = async () => {
-    if (!activeModal || sealing) return
+    if (!activeModal || sealing || photoBusy) return
     const q = quests.find(item => item.id === activeModal)
     if (!q) return
+
+    let filedPhoto = modalPhoto
+    if (photoUploadRef.current) {
+      try {
+        filedPhoto = (await photoUploadRef.current) || filedPhoto
+      } catch {
+        // Keep the local preview if the plate could not be filed remotely yet.
+      }
+    }
 
     const guess = modalGuess.trim()
     if (guess.length < 3) {
@@ -969,10 +983,10 @@ function CasesPage({
       }
     }
 
-    const keysEarned = 1 + (modalPhoto ? 1 : 0)
+    const keysEarned = 1 + (filedPhoto ? 1 : 0)
     onUpdateQuest(activeModal, {
       solved: true,
-      photoUrl: modalPhoto,
+      photoUrl: filedPhoto,
       note: modalNote,
       liked: modalLiked,
       identification: guess,
@@ -987,7 +1001,7 @@ function CasesPage({
       : modalLiked === true
         ? ' The clerk will look for more of that kind.'
         : ''
-    const msg = (modalPhoto
+    const msg = (filedPhoto
       ? 'The name and the plate are on file. Two keys recovered — each opens one classified lead on an open file.'
       : 'The name is on the ledger. One key recovered — spend it to open a classified lead on another file.') + trailNote
     setTelegram(msg)
@@ -998,8 +1012,25 @@ function CasesPage({
 
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (!file) return
-    setModalPhoto(await fileToCompressedDataUrl(file))
+    if (!file || !activeModal) return
+    setPhotoBusy(true)
+    setModalError(null)
+    const questId = activeModal
+    try {
+      const dataUrl = await fileToCompressedDataUrl(file)
+      setModalPhoto(dataUrl)
+      const task = (async () => {
+        const token = await getToken()
+        const uploaded = await uploadQuestPhoto(token, { country, city, questId, dataUrl })
+        return uploaded?.photoUrl || dataUrl
+      })()
+      photoUploadRef.current = task
+      setModalPhoto(await task)
+    } catch (error) {
+      setModalError(error instanceof Error ? error.message : 'The plate could not be filed. Try a JPEG or PNG.')
+    } finally {
+      setPhotoBusy(false)
+    }
   }
 
   const activeQuest = quests.find(q => q.id === activeModal)
@@ -1199,6 +1230,7 @@ function CasesPage({
                     border: `1.5px dashed ${modalPhoto ? 'rgba(160,126,20,0.4)' : 'rgba(160,126,20,0.3)'}`,
                     background: 'rgba(11,13,28,0.6)',
                     overflow: 'hidden',
+                    opacity: photoBusy ? 0.8 : 1,
                   }}
                   onClick={() => fileInputRef.current?.click()}
                   role="button"
@@ -1211,13 +1243,15 @@ function CasesPage({
                   ) : (
                     <div className="flex flex-col items-center gap-2" style={{ color: 'rgba(160,126,20,0.5)' }}>
                       <CameraIcon size={24} />
-                      <span className="font-type text-xs" style={{ letterSpacing: '0.1em', textTransform: 'uppercase' }}>File a Plate — Optional</span>
+                      <span className="font-type text-xs" style={{ letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                        {photoBusy ? 'Filing plate…' : 'File a Plate — Optional'}
+                      </span>
                     </div>
                   )}
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/jpeg,image/png,image/webp,image/heic,image/heif,image/*"
                     className="sr-only"
                     onChange={handlePhotoChange}
                     aria-label="Choose photograph file"
@@ -1310,7 +1344,7 @@ function CasesPage({
                 </button>
                 <button
                   onClick={() => void handleSealCase()}
-                  disabled={sealing || modalGuess.trim().length < 3}
+                  disabled={sealing || photoBusy || modalGuess.trim().length < 3}
                   className="ticket-btn flex-1 font-type text-xs py-2.5 px-6 transition-all hover:brightness-110 active:scale-95"
                   style={{
                     background: 'var(--burgundy)',
@@ -1318,12 +1352,12 @@ function CasesPage({
                     letterSpacing: '0.14em',
                     textTransform: 'uppercase',
                     border: 'none',
-                    cursor: sealing || modalGuess.trim().length < 3 ? 'not-allowed' : 'pointer',
-                    opacity: sealing || modalGuess.trim().length < 3 ? 0.55 : 1,
+                    cursor: sealing || photoBusy || modalGuess.trim().length < 3 ? 'not-allowed' : 'pointer',
+                    opacity: sealing || photoBusy || modalGuess.trim().length < 3 ? 0.55 : 1,
                     boxShadow: '0 0 20px rgba(124,27,44,0.4)',
                   }}
                 >
-                  {sealing ? 'Consulting the Ledger…' : 'Seal the Case'}
+                  {photoBusy ? 'Filing Plate…' : sealing ? 'Consulting the Ledger…' : 'Seal the Case'}
                 </button>
               </div>
             </div>
@@ -1395,6 +1429,9 @@ function QuestCard({ quest, keys, onOpen, onSpendKey }: { quest: Quest; keys: nu
                 alt="Filed evidence"
                 className="polaroid"
                 style={{ width: 50, height: 50, objectFit: 'cover', padding: 3, transform: 'rotate(4deg)' }}
+                onError={event => {
+                  event.currentTarget.style.display = 'none'
+                }}
               />
             )}
           </div>
@@ -1635,10 +1672,14 @@ function AppShell({
     let cancelled = false
     ;(async () => {
       const token = await getToken()
+      const local = loadTripLocal()
       const [remote, trips] = await Promise.all([loadTripRemote(token), loadAllTripsRemote(token)])
-      if (!cancelled && trips.length > 0) setSavedTrips(trips)
-      if (!cancelled && remote) applyTrip(remote)
-      if (!cancelled) hydrated.current = true
+      if (cancelled) return
+      if (trips.length > 0) {
+        setSavedTrips(trips.map(item => mergeTripPhotos(item, local && item.city === local.city && item.country === local.country ? local : null)))
+      }
+      if (remote) applyTrip(mergeTripPhotos(remote, local))
+      hydrated.current = true
     })()
     return () => {
       cancelled = true
@@ -1779,6 +1820,7 @@ function AppShell({
           city={city}
           country={country}
           keys={keys}
+          getToken={getToken}
           onUpdateQuest={handleUpdateQuest}
           onEarnKeys={handleEarnKeys}
           onSpendKey={handleSpendKey}

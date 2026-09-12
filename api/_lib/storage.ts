@@ -3,24 +3,46 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { loadDotEnv } from '../../src/db/client'
 
 const BUCKET = 'pictures'
+const DATA_URL_RE = /^data:([^;]+);base64,(.+)$/
 
-function envName(suffix: string) {
-  return loadDotEnv()['AWS_' + suffix]
+function envName(...names: string[]) {
+  const env = loadDotEnv()
+  for (const name of names) {
+    const value = env[name]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return ''
+}
+
+function storageConfig() {
+  return {
+    accessKeyId: envName('AWS_ACCESS_KEY_ID'),
+    secretAccessKey: envName('AWS_SECRET_ACCESS_KEY'),
+    endpoint: envName('AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL'),
+    region: envName('AWS_REGION', 'AWS_DEFAULT_REGION') || 'us-east-2',
+  }
+}
+
+export function hasObjectStorage() {
+  const config = storageConfig()
+  return Boolean(config.accessKeyId && config.secretAccessKey && config.endpoint)
 }
 
 function createS3() {
-  const accessKeyId = envName('ACCESS_KEY_ID')
-  const secretAccessKey = envName('SECRET_ACCESS_KEY')
-  const endpoint = envName('ENDPOINT_URL_S3')
-  const region = envName('REGION') || 'us-east-2'
-  if (!accessKeyId || !secretAccessKey || !endpoint) {
+  const config = storageConfig()
+  if (!config.accessKeyId || !config.secretAccessKey || !config.endpoint) {
     throw new Error('Neon object storage credentials are not set')
   }
   return new S3Client({
     forcePathStyle: true,
-    region,
-    endpoint,
-    credentials: { accessKeyId, secretAccessKey },
+    region: config.region,
+    endpoint: config.endpoint,
+    credentials: {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+    },
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
   })
 }
 
@@ -29,8 +51,38 @@ export function albumPhotoKey(userId: string, country: string, city: string, que
   return `albums/${userId}/${safe(country)}/${safe(city)}/${safe(questKey)}.jpg`
 }
 
+export function isSafeAlbumKey(key: string) {
+  return /^albums\/[A-Za-z0-9._/-]+$/.test(key) && !key.includes('..')
+}
+
+export function photoProxyPath(key: string) {
+  return `/api/photo?k=${encodeURIComponent(key)}`
+}
+
+export function photoKeyFromUrl(value: string | null | undefined) {
+  if (!value) return null
+  try {
+    const url = value.startsWith('/') ? new URL(value, 'http://localhost') : new URL(value)
+    const fromQuery = url.searchParams.get('k')
+    if (fromQuery && isSafeAlbumKey(fromQuery)) return fromQuery
+    const pictures = url.pathname.indexOf('/pictures/')
+    if (pictures >= 0) {
+      const key = decodeURIComponent(url.pathname.slice(pictures + '/pictures/'.length))
+      if (isSafeAlbumKey(key)) return key
+    }
+    const albums = url.pathname.indexOf('/albums/')
+    if (albums >= 0) {
+      const key = decodeURIComponent(url.pathname.slice(albums + 1))
+      if (isSafeAlbumKey(key)) return key
+    }
+  } catch {
+    if (isSafeAlbumKey(value)) return value
+  }
+  return isSafeAlbumKey(value) ? value : null
+}
+
 export async function uploadDataUrl(key: string, dataUrl: string) {
-  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
+  const match = dataUrl.match(DATA_URL_RE)
   if (!match) return false
   const body = Buffer.from(match[2], 'base64')
   await createS3().send(
@@ -39,9 +91,20 @@ export async function uploadDataUrl(key: string, dataUrl: string) {
       Key: key,
       Body: body,
       ContentType: match[1] || 'image/jpeg',
+      CacheControl: 'public, max-age=31536000, immutable',
     }),
   )
   return true
+}
+
+export async function getPhotoBytes(key: string) {
+  const response = await createS3().send(new GetObjectCommand({ Bucket: BUCKET, Key: key }))
+  const bytes = await response.Body?.transformToByteArray()
+  if (!bytes) return null
+  return {
+    body: Buffer.from(bytes),
+    contentType: response.ContentType || 'image/jpeg',
+  }
 }
 
 export async function signedPhotoUrl(key: string) {
@@ -50,4 +113,13 @@ export async function signedPhotoUrl(key: string) {
 
 export function isDataUrl(value: string | null | undefined) {
   return Boolean(value?.startsWith('data:'))
+}
+
+export function dataUrlToBuffer(dataUrl: string) {
+  const match = dataUrl.match(DATA_URL_RE)
+  if (!match) return null
+  return {
+    contentType: match[1] || 'image/jpeg',
+    body: Buffer.from(match[2], 'base64'),
+  }
 }

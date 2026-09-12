@@ -30,6 +30,12 @@
     },
     "api/me/trip.ts": {
       "maxDuration": 60
+    },
+    "api/me/photo.ts": {
+      "maxDuration": 60
+    },
+    "api/photo.ts": {
+      "maxDuration": 30
     }
   }
 }
