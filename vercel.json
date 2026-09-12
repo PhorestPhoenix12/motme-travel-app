@@ -17,7 +17,7 @@
     },
     "api/generate-quests.ts": {
       "maxDuration": 60,
-      "includeFiles": "src/lib/**"
+      "includeFiles": "src/db/**"
     },
     "api/verify-guess.ts": {
       "maxDuration": 60,

@@ -232,7 +232,8 @@ async function overpassAround(lat: number, lng: number, bbox?: { south: number; 
   const area = bbox
     ? `(${bbox.south},${bbox.west},${bbox.north},${bbox.east})`
     : `(around:${radius},${lat},${lng})`
-  const query = `[out:json][timeout:25];
+  const timeout = onServerless() ? 8 : 25
+  const query = `[out:json][timeout:${timeout}];
 (
   nwr["tourism"]${area};
   nwr["historic"]${area};
@@ -244,16 +245,15 @@ async function overpassAround(lat: number, lng: number, bbox?: { south: number; 
 );
 out center;`
   let lastError = 'Overpass failed'
-  for (const endpoint of OVERPASS) {
+  const endpoints = onServerless() ? OVERPASS.slice(0, 1) : OVERPASS
+  for (const endpoint of endpoints) {
     try {
-      const res = await enqueue(() =>
-        fetch(endpoint, {
-          method: 'POST',
-          headers: { 'User-Agent': USER_AGENT, 'Content-Type': 'text/plain' },
-          body: query,
-          signal: AbortSignal.timeout(35000),
-        }),
-      )
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'User-Agent': USER_AGENT, 'Content-Type': 'text/plain' },
+        body: query,
+        signal: AbortSignal.timeout(timeout * 1000 + 2000),
+      })
       if (!res.ok) {
         lastError = `Overpass ${res.status}`
         continue
@@ -319,15 +319,119 @@ function nominatimHitToPlace(
   }
 }
 
+function foldGeo(text: string) {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
 function foldId(text: string) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+}
+
+function onServerless() {
+  return Boolean(process.env.VERCEL)
+}
+
+async function geocodeOpenMeteo(city: string, country: string) {
+  const countryFold = foldGeo(country)
+  const labels = [...citySearchLabels(city)].reverse()
+  for (const name of labels) {
+    try {
+      const url = new URL('https://geocoding-api.open-meteo.com/v1/search')
+      url.searchParams.set('name', name)
+      url.searchParams.set('count', '8')
+      url.searchParams.set('language', 'en')
+      url.searchParams.set('format', 'json')
+      const res = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(8000) })
+      if (!res.ok) continue
+      const data = (await res.json()) as {
+        results?: Array<{ name?: string; latitude?: number; longitude?: number; country?: string; admin1?: string; country_code?: string }>
+      }
+      const hits = data.results || []
+      const hit =
+        hits.find(item => foldGeo(item.country || '') === countryFold) ||
+        hits.find(item => countryFold.includes(foldGeo(item.country || '')) || foldGeo(item.country || '').includes(countryFold)) ||
+        null
+      if (!hit || !Number.isFinite(Number(hit.latitude)) || !Number.isFinite(Number(hit.longitude))) continue
+      return {
+        lat: Number(hit.latitude),
+        lng: Number(hit.longitude),
+        label: [hit.name, hit.admin1, hit.country].filter(Boolean).join(', '),
+        state: hit.admin1,
+        county: hit.name,
+        bbox: null as { south: number; north: number; west: number; east: number } | null,
+      }
+    } catch (error) {
+      console.error('Open-Meteo geocode failed:', error instanceof Error ? error.message : error)
+    }
+  }
+  return null
+}
+
+async function photonSearch(query: string, limit = 8) {
+  const url = new URL('https://photon.komoot.io/api/')
+  url.searchParams.set('q', query)
+  url.searchParams.set('limit', String(limit))
+  url.searchParams.set('lang', 'en')
+  const res = await fetch(url, {
+    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!res.ok) throw new Error(`Photon ${res.status}`)
+  const data = (await res.json()) as {
+    features?: Array<{
+      geometry?: { coordinates?: number[] }
+      properties?: {
+        name?: string
+        country?: string
+        city?: string
+        street?: string
+        osm_key?: string
+        osm_value?: string
+        osm_id?: number
+        osm_type?: string
+        state?: string
+      }
+    }>
+  }
+  return data.features || []
+}
+
+async function geocodePhoton(city: string, country: string) {
+  const countryFold = foldGeo(country)
+  for (const query of geocodeQueries(city, country)) {
+    try {
+      const features = await photonSearch(query, 5)
+      const hit = features.find(item => foldGeo(item.properties?.country || '') === countryFold) || features[0]
+      const coords = hit?.geometry?.coordinates
+      const lng = Number(coords?.[0])
+      const lat = Number(coords?.[1])
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
+      const props = hit.properties || {}
+      return {
+        lat,
+        lng,
+        label: [props.name, props.city, props.state, props.country].filter(Boolean).join(', '),
+        state: props.state,
+        county: props.city || props.name,
+        bbox: null as { south: number; north: number; west: number; east: number } | null,
+      }
+    } catch (error) {
+      console.error('Photon geocode failed:', error instanceof Error ? error.message : error)
+    }
+  }
+  return null
 }
 
 async function nominatimPois(city: string, country: string, region?: string): Promise<OsmPlace[]> {
   const cityLabels = citySearchLabels(city)
   const regionName = region?.replace(/\s+Province$/i, '').replace(/\s+Governorate$/i, '').trim()
   const labels = [...new Set([regionName, cityLabels[cityLabels.length - 1]].filter(Boolean))]
-  const terms = ['mosque', 'park', 'river', 'school', 'market']
+  const terms = ['market', 'bazaar', 'shop', 'mosque', 'park']
   const places: OsmPlace[] = []
   const seen = new Set<string>()
   for (const focus of labels) {
@@ -380,11 +484,90 @@ const cityCache = new Map<string, Promise<OsmPlace[]>>()
 
 export async function geocodeOsm(city: string, country: string) {
   try {
-    return await nominatimGeocode(city, country)
+    return (await geocodeOpenMeteo(city, country)) || (await geocodePhoton(city, country)) || (await nominatimGeocode(city, country))
   } catch (error) {
     console.error('OSM geocode failed:', error instanceof Error ? error.message : error)
     return null
   }
+}
+
+function photonFeatureToPlace(
+  feature: {
+    geometry?: { coordinates?: number[] }
+    properties?: {
+      name?: string
+      country?: string
+      city?: string
+      street?: string
+      osm_key?: string
+      osm_value?: string
+      osm_id?: number
+      osm_type?: string
+      state?: string
+    }
+  },
+  city: string,
+  country: string,
+): OsmPlace | null {
+  const props = feature.properties || {}
+  const name = (props.name || '').trim()
+  if (!name) return null
+  const key = props.osm_key || ''
+  const value = props.osm_value || ''
+  if (['place', 'boundary', 'highway', 'railway'].includes(key)) return null
+  const classified = classify({ [key]: value }) || {
+    category: key === 'shop' ? 'Shopping' : 'Landmarks',
+    types: [value || key || 'attraction'],
+    primaryType: value || key || 'attraction',
+    summary: '',
+  }
+  const lng = Number(feature.geometry?.coordinates?.[0])
+  const lat = Number(feature.geometry?.coordinates?.[1])
+  const address = [props.street, props.city || city, props.state, props.country || country].filter(Boolean).join(', ')
+  return {
+    id: props.osm_id ? `osm:${props.osm_type || 'node'}:${props.osm_id}` : `osm:photon:${foldId(name)}`,
+    name,
+    address,
+    types: classified.types,
+    summary: classified.summary,
+    rating: null,
+    ratings: 0,
+    primaryType: classified.primaryType,
+    lat: Number.isFinite(lat) ? lat : undefined,
+    lng: Number.isFinite(lng) ? lng : undefined,
+    category: classified.category,
+  }
+}
+
+async function photonPois(city: string, country: string, region?: string): Promise<OsmPlace[]> {
+  const cityLabels = citySearchLabels(city)
+  const regionName = region?.replace(/\s+Province$/i, '').replace(/\s+Governorate$/i, '').trim()
+  const focus = regionName || cityLabels[cityLabels.length - 1]
+  if (!focus) return []
+  const terms = ['market', 'bazaar', 'shop', 'mosque', 'park']
+  const batches = await Promise.all(
+    terms.map(async term => {
+      try {
+        return await photonSearch(`${term} ${focus} ${country}`, 8)
+      } catch (error) {
+        console.error('Photon POI search failed:', error instanceof Error ? error.message : error)
+        return []
+      }
+    }),
+  )
+  const places: OsmPlace[] = []
+  const seen = new Set<string>()
+  for (const feature of batches.flat()) {
+    const place = photonFeatureToPlace(feature, city, country)
+    if (!place) continue
+    const key = place.name.toLowerCase()
+    if (seen.has(key) || seen.has(place.id)) continue
+    seen.add(key)
+    seen.add(place.id)
+    places.push(place)
+    if (places.length >= 16) break
+  }
+  return places
 }
 
 export async function loadOsmPlaces(city: string, country: string, bias?: { lat: number; lng: number } | null): Promise<OsmPlace[]> {
@@ -392,15 +575,18 @@ export async function loadOsmPlaces(city: string, country: string, bias?: { lat:
   const pending = cityCache.get(key)
   if (pending) return pending
   const work = (async () => {
-    const geo = bias && typeof bias.lat === 'number' && typeof bias.lng === 'number'
-      ? { ...(await nominatimReverse(bias.lat, bias.lng).catch(() => null)), lat: bias.lat, lng: bias.lng }
-      : await nominatimGeocode(city, country)
+    const located = await geocodeOsm(city, country)
+    const geo = located || (bias && typeof bias.lat === 'number'
+      ? { lat: bias.lat, lng: bias.lng, state: undefined as string | undefined, bbox: null as { south: number; north: number; west: number; east: number } | null }
+      : null)
     if (!geo) return []
     let elements: OsmElement[] = []
-    try {
-      elements = await overpassAround(geo.lat, geo.lng, 'bbox' in geo ? geo.bbox ?? null : null)
-    } catch (error) {
-      console.error(`Overpass failed for ${city}, ${country}:`, error instanceof Error ? error.message : error)
+    if (!onServerless()) {
+      try {
+        elements = await overpassAround(geo.lat, geo.lng, geo.bbox ?? null)
+      } catch (error) {
+        console.error(`Overpass failed for ${city}, ${country}:`, error instanceof Error ? error.message : error)
+      }
     }
     const seen = new Set<string>()
     const places: OsmPlace[] = []
@@ -413,8 +599,11 @@ export async function loadOsmPlaces(city: string, country: string, bias?: { lat:
       places.push(place)
     }
     for (const element of elements) add(elementToPlace(element, city, country))
+    const region = geo.state
     if (places.length < 8) {
-      const region = 'state' in geo ? geo.state : undefined
+      for (const place of await photonPois(city, country, region)) add(place)
+    }
+    if (places.length < 8 && !onServerless()) {
       for (const place of await nominatimPois(city, country, region)) add(place)
     }
     return places
@@ -429,8 +618,9 @@ export async function loadOsmPlaces(city: string, country: string, bias?: { lat:
 
 export function osmPlacesForInterest(places: OsmPlace[], interest: string) {
   const direct = places.filter(place => place.category === interest)
+  if (interest === 'Shopping' && direct.length > 0) return [...direct, ...places.filter(place => place.category !== 'Shopping')]
   if (direct.length > 0) return direct
   if (interest === 'Architecture') return places.filter(place => place.category === 'Landmarks')
-  if (interest === 'Landmarks') return places
+  if (interest === 'Landmarks' || interest === 'Shopping') return places
   return places.filter(place => place.category === 'Landmarks' || place.category === interest)
 }

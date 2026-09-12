@@ -1726,7 +1726,8 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
     }
 
     const { gemini, places: placesKey } = apiKeys()
-    let catalog = await ensureBaseCards(city, country, { priorCases, preferences })
+    const fast = Boolean(process.env.VERCEL) || !gemini
+    let catalog = await loadPlaceCards(city, country)
     let selectedCards: CatalogCard[] = []
 
     const takeMatching = (strict: boolean) => {
@@ -1744,30 +1745,20 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
     let shortfalls = remainingNeeds(interests, counts, selectedCards)
     if (shortfalls.length > 0) {
       selectedCards = mergeCards(selectedCards, await mintForNeeds({
-        city, country, shortfalls, catalog, alreadyChosen: selectedCards, priorCases, preferences, placesKey, gemini,
+        city, country, shortfalls, catalog, alreadyChosen: selectedCards, priorCases, preferences, placesKey,
+        gemini: fast ? '' : gemini,
+        lean: true,
       }))
       catalog = await loadPlaceCards(city, country)
     }
 
     takeMatching(false)
-    shortfalls = remainingNeeds(interests, counts, selectedCards)
-    if (shortfalls.length > 0) {
-      selectedCards = mergeCards(selectedCards, await mintForNeeds({
-        city, country, shortfalls, catalog, alreadyChosen: selectedCards, priorCases, preferences: {}, placesKey, gemini,
-      }))
-      catalog = await loadPlaceCards(city, country)
-    }
-
     const wanted = interests.reduce((sum, interest) => sum + (counts[interest] || 1), 0)
     if (selectedCards.length < wanted) {
       selectedCards = mergeCards(selectedCards, fillFromCatalog(catalog, selectedCards, wanted - selectedCards.length, interests))
     }
-
     if (selectedCards.length === 0) {
-      await mintBaseCardsForCity(city, country, { min: Math.max(3, wanted), priorCases, preferences })
-      catalog = await loadPlaceCards(city, country)
-      takeMatching(false)
-      selectedCards = mergeCards(selectedCards, fillFromCatalog(catalog, selectedCards, wanted || 1, interests))
+      selectedCards = mergeCards(selectedCards, fillFromCatalog(catalog, selectedCards, wanted || 1))
     }
 
     if (selectedCards.length === 0) {
@@ -1780,12 +1771,14 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
         priorCases,
         preferences: {},
         placesKey,
-        gemini,
+        gemini: '',
         lean: true,
       }))
     }
 
-    selectedCards = await enforceCaseRulesOnCards(selectedCards, city, country, gemini)
+    if (!fast) {
+      selectedCards = await enforceCaseRulesOnCards(selectedCards, city, country, gemini)
+    }
     const filed = await loadPlaceCardsByIds(selectedCards.map(card => card.id).filter(Boolean))
     const seenVenues = new Set<string>()
     const quests = filed
