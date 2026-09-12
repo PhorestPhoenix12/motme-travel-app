@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { handleGenerateQuests } from '../server/generate-quests'
+import { handleGenerateQuests } from './_lib/generate-quests'
 
 export const config = { maxDuration: 60 }
 

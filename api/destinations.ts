@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { handleDestinationsApi } from '../server/destinations'
+import { handleDestinationsApi } from './_lib/destinations'
 
 export const config = { maxDuration: 60 }
 

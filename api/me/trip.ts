@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { handlePersistApi } from '../../server/persist-api'
-import { runNodeApi, withApiPath } from '../../server/node-api'
+import { handlePersistApi } from '../_lib/persist-api'
+import { runNodeApi, withApiPath } from '../_lib/node-api'
 
 export const config = { maxDuration: 60 }
 
