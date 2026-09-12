@@ -29,8 +29,21 @@ export function loadDotEnv(): Record<string, string> {
   return values
 }
 
-const env = loadDotEnv()
-const databaseUrl = env['DATABASE' + '_URL'] || 'postgresql://localhost/postgres'
+type AppDb = ReturnType<typeof drizzle>
 
-export const db = drizzle(databaseUrl)
-export const clerkSecretKey = env['CLERK' + '_SECRET_KEY']
+function createDb(): AppDb {
+  const url = loadDotEnv()['DATABASE' + '_URL']
+  if (!url) throw new Error('DATABASE_URL is not set')
+  return drizzle(url)
+}
+
+let dbInstance: AppDb | undefined
+
+export const db = new Proxy({} as AppDb, {
+  get(_target, property, receiver) {
+    if (!dbInstance) dbInstance = createDb()
+    return Reflect.get(dbInstance, property, receiver)
+  },
+})
+
+export const clerkSecretKey = loadDotEnv()['CLERK' + '_SECRET_KEY']
