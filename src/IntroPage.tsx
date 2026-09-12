@@ -1,4 +1,4 @@
-import { SignInButton, SignUpButton } from '@clerk/clerk-react'
+import { useClerk } from '@clerk/clerk-react'
 
 export function AuthGateSplash() {
   return (
@@ -23,10 +23,30 @@ export function AuthGateSplash() {
   )
 }
 
-export default function IntroPage() {
+export function ClerkIntroPage() {
+  const clerk = useClerk()
+  return (
+    <IntroPage
+      onSignIn={() => {
+        void clerk.openSignIn()
+      }}
+      onSignUp={() => {
+        void clerk.openSignUp()
+      }}
+    />
+  )
+}
+
+export default function IntroPage({
+  onSignIn,
+  onSignUp,
+}: {
+  onSignIn?: () => void
+  onSignUp?: () => void
+}) {
   return (
     <div
-      className="min-h-screen relative overflow-hidden page-enter"
+      className="min-h-screen relative"
       style={{ background: 'var(--navy)', fontFamily: 'Crimson Text, Georgia, serif' }}
     >
       <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
@@ -42,7 +62,7 @@ export default function IntroPage() {
         />
       </div>
 
-      <header className="relative z-10 flex flex-col items-center justify-center pt-10 pb-2">
+      <header className="relative z-10 flex flex-col items-center justify-center pt-10 pb-2 page-enter">
         <div className="font-display flex items-center gap-2 select-none" style={{ color: 'var(--gold-light)', letterSpacing: '0.06em' }}>
           <span style={{ fontSize: 11, color: 'var(--gold-dim)', fontFamily: 'Courier Prime, monospace' }}>✦</span>
           <span style={{ fontSize: 18, fontWeight: 600 }}>MotME</span>
@@ -53,7 +73,7 @@ export default function IntroPage() {
         </p>
       </header>
 
-      <main className="relative z-10 px-6 pt-8 pb-16 max-w-3xl mx-auto">
+      <main className="relative z-10 px-6 pt-8 pb-16 max-w-3xl mx-auto page-enter">
         <div className="flex items-center justify-center pb-6" aria-hidden="true">
           <div style={{ width: 180, height: 1, background: 'linear-gradient(to right, transparent, var(--gold-dim), transparent)' }} />
         </div>
@@ -80,42 +100,50 @@ export default function IntroPage() {
         </div>
 
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-10">
-          <SignInButton mode="modal">
-            <button
-              type="button"
-              className="ticket-btn font-type px-10 py-4 text-sm transition-all hover:brightness-110 active:scale-95"
-              style={{
-                background: 'var(--burgundy)',
-                color: 'var(--cream)',
-                letterSpacing: '0.16em',
-                textTransform: 'uppercase',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: 12,
-                boxShadow: '0 0 30px rgba(124,27,44,0.4)',
-              }}
-            >
-              Sign In — Board the Train
-            </button>
-          </SignInButton>
-          <SignUpButton mode="modal">
-            <button
-              type="button"
-              className="font-type px-8 py-3.5 text-sm transition-all hover:brightness-110"
-              style={{
-                background: 'transparent',
-                color: 'var(--gold-light)',
-                letterSpacing: '0.14em',
-                textTransform: 'uppercase',
-                border: '1px solid rgba(160,126,20,0.45)',
-                cursor: 'pointer',
-                fontSize: 11,
-              }}
-            >
-              Request a Commission
-            </button>
-          </SignUpButton>
+          <button
+            type="button"
+            className="font-type px-10 py-4 text-sm transition-all hover:brightness-110 active:scale-95"
+            style={{
+              background: 'var(--burgundy)',
+              color: 'var(--cream)',
+              letterSpacing: '0.16em',
+              textTransform: 'uppercase',
+              border: 'none',
+              cursor: onSignIn ? 'pointer' : 'default',
+              fontSize: 12,
+              boxShadow: '0 0 30px rgba(124,27,44,0.4)',
+              opacity: onSignIn ? 1 : 0.7,
+            }}
+            onClick={() => onSignIn?.()}
+            disabled={!onSignIn}
+          >
+            Sign In — Board the Train
+          </button>
+          <button
+            type="button"
+            className="font-type px-8 py-3.5 text-sm transition-all hover:brightness-110"
+            style={{
+              background: 'transparent',
+              color: 'var(--gold-light)',
+              letterSpacing: '0.14em',
+              textTransform: 'uppercase',
+              border: '1px solid rgba(160,126,20,0.45)',
+              cursor: onSignUp ? 'pointer' : 'default',
+              fontSize: 11,
+              opacity: onSignUp ? 1 : 0.7,
+            }}
+            onClick={() => onSignUp?.()}
+            disabled={!onSignUp}
+          >
+            Request a Commission
+          </button>
         </div>
+
+        {!onSignIn && (
+          <p className="font-body text-center mt-5" style={{ fontSize: 14, color: 'rgba(220,200,160,0.55)' }}>
+            The credential window is dark. The clerk cannot take your papers until Clerk is configured for this depot.
+          </p>
+        )}
 
         <ul className="mt-16 grid grid-cols-1 sm:grid-cols-3 gap-5">
           {[

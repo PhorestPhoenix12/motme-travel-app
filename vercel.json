@@ -8,6 +8,9 @@
     "api/health.ts": {
       "maxDuration": 10
     },
+    "api/config.ts": {
+      "maxDuration": 10
+    },
     "api/destinations.ts": {
       "maxDuration": 60,
       "includeFiles": "src/data/cities-by-country.json"

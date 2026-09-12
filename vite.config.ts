@@ -36,6 +36,7 @@ export default defineConfig(({ mode }) => {
       motmePersistApi(),
       motmeQuestApi(),
       motmeDestinationsApi(),
+      motmePublicConfigApi(),
     ],
     resolve: {
       alias: {
@@ -83,6 +84,34 @@ function mountApi(
       res.setHeader('Content-Type', 'application/json')
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'API failed' }))
     }
+  }
+}
+
+function motmePublicConfigApi(): Plugin {
+  const middleware = (
+    req: import('node:http').IncomingMessage,
+    res: import('node:http').ServerResponse,
+    next: () => void,
+  ) => {
+    if ((req.url || '').split('?')[0] !== '/api/config') return next()
+    const clerkPublishableKey = (
+      process.env.VITE_CLERK_PUBLISHABLE_KEY ||
+      process.env.CLERK_PUBLISHABLE_KEY ||
+      ''
+    ).trim()
+    res.statusCode = 200
+    res.setHeader('Content-Type', 'application/json')
+    res.setHeader('Cache-Control', 'no-store')
+    res.end(JSON.stringify({ clerkPublishableKey }))
+  }
+  return {
+    name: 'motme-public-config-api',
+    configureServer(server) {
+      server.middlewares.use(middleware)
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(middleware)
+    },
   }
 }
 

@@ -2,13 +2,11 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { UserButton, useAuth, useUser } from '@clerk/clerk-react'
 import AccountPage from './AccountPage'
 import AlbumPage from './AlbumPage'
-import IntroPage, { AuthGateSplash } from './IntroPage'
+import IntroPage, { AuthGateSplash, ClerkIntroPage } from './IntroPage'
 import { countryByName } from './data/countries'
 import { guessMatchesPlace } from './lib/identify'
 import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, persistTrip, secretForQuest, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
 import { createCitySession, listCities, resolveCity, searchCountries, suggestCities, type CitySuggestion } from './lib/destinations'
-
-const CLERK_ENABLED = Boolean(import.meta.env.VITE_CLERK_PUBLISHABLE_KEY)
 
 /* ═══════════════════════════════════════════════════════════
    TYPES
@@ -269,6 +267,7 @@ function NavBar({
   questsTotal,
   questsSolved,
   onNavigate,
+  showUserButton,
 }: {
   page: Page
   city: string
@@ -276,6 +275,7 @@ function NavBar({
   questsTotal: number
   questsSolved: number
   onNavigate: (p: Page) => void
+  showUserButton: boolean
 }) {
   return (
     <nav
@@ -318,7 +318,7 @@ function NavBar({
           </div>
         )}
         <NavTab active={page === 'account'} onClick={() => onNavigate('account')}>Account</NavTab>
-        {CLERK_ENABLED && (
+        {showUserButton && (
           <div className="flex items-center ml-1">
             <UserButton
               appearance={{
@@ -1562,17 +1562,24 @@ function fromStoredTrip(trip: StoredTrip): Quest[] {
   })
 }
 
-export default function App() {
-  if (CLERK_ENABLED) return <ClerkBackedApp />
-  return <AppShell getToken={async () => null} clerkReady />
+export default function App({ clerkEnabled }: { clerkEnabled: boolean }) {
+  if (clerkEnabled) return <ClerkBackedApp />
+  return <IntroPage />
 }
 
 function ClerkBackedApp() {
   const { isLoaded, isSignedIn } = useUser()
   const { getToken } = useAuth()
-  if (!isLoaded) return <AuthGateSplash />
-  if (!isSignedIn) return <IntroPage />
-  return <AppShell getToken={getToken} clerkReady />
+  const [timedOut, setTimedOut] = useState(false)
+
+  useEffect(() => {
+    const id = window.setTimeout(() => setTimedOut(true), 8000)
+    return () => window.clearTimeout(id)
+  }, [])
+
+  if (!isLoaded && !timedOut) return <AuthGateSplash />
+  if (!isSignedIn) return <ClerkIntroPage />
+  return <AppShell getToken={getToken} clerkReady={isLoaded} />
 }
 
 function AppShell({
@@ -1723,6 +1730,7 @@ function AppShell({
         questsTotal={quests.length}
         questsSolved={solvedCount}
         onNavigate={navigate}
+        showUserButton={clerkReady}
       />
       {generating && (
         <div

@@ -208,6 +208,12 @@
 .telegram-animate { animation: telegram-slide 4s ease-in-out forwards; }
 .page-enter { animation: page-enter 0.5s ease-out both; }
 
+#clerk-components,
+.cl-modalBackdrop,
+.cl-modalContent {
+  z-index: 100000 !important;
+}
+
 .new-hint {
   animation: new-hint-glow 2s ease-out forwards;
   border-radius: 3px;
