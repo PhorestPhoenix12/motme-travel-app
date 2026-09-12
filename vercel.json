@@ -6,7 +6,8 @@
   "outputDirectory": "dist",
   "functions": {
     "api/health.ts": {
-      "maxDuration": 10
+      "maxDuration": 30,
+      "includeFiles": "src/db/**"
     },
     "api/config.ts": {
       "maxDuration": 10
@@ -23,19 +24,24 @@
       "includeFiles": "src/lib/**"
     },
     "api/me/profile.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "src/db/**"
     },
     "api/me/trips.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "src/db/**"
     },
     "api/me/trip.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "src/db/**"
     },
     "api/me/photo.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "src/db/**"
     },
     "api/photo.ts": {
-      "maxDuration": 30
+      "maxDuration": 30,
+      "includeFiles": "src/db/**"
     }
   }
 }
