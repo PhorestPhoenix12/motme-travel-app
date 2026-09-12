@@ -18,7 +18,7 @@ import {
   type CatalogCard,
   type PreferenceMap,
 } from './case-catalog'
-import { geocodeOsm, loadOsmPlaces, osmPlacesForInterest } from './osm-places'
+import { citySearchLabels, geocodeOsm, geocodeQueries, loadOsmPlaces, osmPlacesForInterest } from './osm-places'
 try {
   tls.setDefaultCACertificates([
     ...tls.getCACertificates(),
@@ -282,14 +282,17 @@ function belongsToDestination(
   city: string,
   country: string,
   bias?: { lat: number; lng: number } | null,
+  maxKm = 22,
 ) {
   const hay = foldName(`${place.address || ''} ${place.name || ''}`)
   const cityFold = foldName(city)
   if (cityFold && hay.includes(cityFold)) return true
+  const tokens = cityFold.split(' ').filter(token => token.length >= 4)
+  if (tokens.some(token => hay.includes(token))) return true
   if ((CITY_ALIASES[cityFold] || []).some(alias => hay.includes(alias))) return true
   if (bias && typeof place.lat === 'number' && typeof place.lng === 'number') {
     const km = distanceKm(bias.lat, bias.lng, place.lat, place.lng)
-    if (km <= 22) return true
+    if (km <= maxKm) return true
   }
   return false
 }
@@ -439,7 +442,10 @@ function queriesFor(
     chosen.unshift(variants[2], variants[1])
   }
   if (chosen.length < 2 && variants.length > 1) chosen.push(variants[variants.length - 1])
-  return [...new Set(chosen.map(build => build(city, country)))]
+  const labels = citySearchLabels(city)
+  const primary = labels[0] || city
+  const extras = labels.slice(1).map(label => chosen[0](label, country))
+  return [...new Set([...chosen.map(build => build(primary, country)), ...extras])]
 }
 
 function normalizeCounts(interests: string[], counts?: Record<string, number>) {
@@ -476,13 +482,14 @@ function extractJson(text: string) {
 }
 
 let placesNewDisabled = false
+let googlePlacesDisabled = false
 
 async function searchPlacesNew(
   query: string,
   apiKey: string,
   options?: { includedType?: string; bias?: { lat: number; lng: number } | null },
 ): Promise<PlaceCandidate[]> {
-  if (placesNewDisabled) throw new Error('Places New quota exhausted')
+  if (googlePlacesDisabled || placesNewDisabled) return []
   const payload: Record<string, unknown> = { textQuery: query, languageCode: 'en', pageSize: 20 }
   if (options?.includedType) payload.includedType = options.includedType
   if (options?.bias) {
@@ -505,7 +512,10 @@ async function searchPlacesNew(
   })
   if (!res.ok) {
     const detail = await res.text()
-    if (res.status === 429) placesNewDisabled = true
+    if (res.status === 429) {
+      placesNewDisabled = true
+      googlePlacesDisabled = true
+    }
     throw new Error(`Places New ${res.status}: ${detail.slice(0, 280)}`)
   }
   const data = (await res.json()) as {
@@ -555,6 +565,7 @@ async function searchPlacesLegacy(query: string, apiKey: string): Promise<PlaceC
     }>
   }
   if (data.status && data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+    if (data.status === 'REQUEST_DENIED' || data.status === 'OVER_QUERY_LIMIT') googlePlacesDisabled = true
     throw new Error(`Places legacy ${data.status}: ${data.error_message || ''}`.trim())
   }
   return (data.results ?? []).map(place => ({
@@ -574,12 +585,14 @@ async function findPlaces(
   apiKey: string,
   bias?: { lat: number; lng: number } | null,
 ) {
+  if (googlePlacesDisabled) return [] as PlaceCandidate[]
   try {
     const latest = await searchPlacesNew(query, apiKey, { bias })
     if (latest.length > 0) return latest
   } catch (error) {
     console.error('Places New search failed:', error instanceof Error ? error.message : error)
   }
+  if (googlePlacesDisabled) return [] as PlaceCandidate[]
   try {
     return await searchPlacesLegacy(query, apiKey)
   } catch (error) {
@@ -590,9 +603,11 @@ async function findPlaces(
 
 async function geocodeCity(city: string, country: string, apiKey: string) {
   if (apiKey && !placesNewDisabled) {
-    const hits = await searchPlacesNew(`${city}, ${country}`, apiKey).catch(() => [])
-    const hit = hits.find(place => typeof place.lat === 'number' && typeof place.lng === 'number')
-    if (hit && hit.lat != null && hit.lng != null) return { lat: hit.lat, lng: hit.lng }
+    for (const query of geocodeQueries(city, country)) {
+      const hits = await searchPlacesNew(query, apiKey).catch(() => [])
+      const hit = hits.find(place => typeof place.lat === 'number' && typeof place.lng === 'number')
+      if (hit && hit.lat != null && hit.lng != null) return { lat: hit.lat, lng: hit.lng }
+    }
   }
   const osm = await geocodeOsm(city, country)
   return osm ? { lat: osm.lat, lng: osm.lng } : null
@@ -1311,7 +1326,7 @@ async function choosePlacesForNeeds(params: {
   const bias = await geocodeCity(city, country, placesKey)
   const blocked = [...catalog.map(catalogAsPlace), ...alreadyChosen.map(catalogAsPlace)]
 
-  const searchResults = !placesKey || placesNewDisabled
+  const searchResults = !placesKey || googlePlacesDisabled
     ? shortfalls.map(({ interest, needed }) => ({ interest, needed, found: [] as PlaceCandidate[] }))
     : await Promise.all(
     shortfalls.map(async ({ interest, needed }) => {
@@ -1337,8 +1352,10 @@ async function choosePlacesForNeeds(params: {
         ...typed,
       ])
       const merged = uniquePlaces(batches.flat())
-      const local = merged.filter(place => belongsToDestination(place, city, country, bias))
-      const found = (local.length > 0 ? local : merged).filter(place => {
+      const local = merged.filter(place => belongsToDestination(place, city, country, bias, 22))
+      const regional = merged.filter(place => belongsToDestination(place, city, country, bias, 220))
+      const pool = local.length >= needed ? local : regional.length > 0 ? regional : merged
+      const found = pool.filter(place => {
         const like = placeAsLike({ ...place, category: interest })
         if (blocked.some(item => isSamePlace(item, place) || cardsTooSimilar(placeAsLike(item), like))) return false
         if (selected.some(item => isSamePlace(item, place) || cardsTooSimilar(placeAsLike(item), like))) return false
@@ -1493,19 +1510,28 @@ async function persistChosenCards(
   city: string,
   country: string,
 ) {
+  const remaining = [...selected]
   const kept: GeneratedQuest[] = []
   for (const quest of minted) {
-    const place = selected.find(item => foldName(item.name) === foldName(quest.place_name))
+    const idx = remaining.findIndex(item => foldName(item.name) === foldName(quest.place_name))
+    const place = idx >= 0 ? remaining.splice(idx, 1)[0] : remaining.shift()
     if (!place) continue
     const like = placeAsLike(place, quest.clue)
     if (alreadyChosen.some(card => cardsTooSimilar(card, like))) continue
-    if (kept.some(item => foldName(item.place_name) === foldName(quest.place_name))) continue
+    if (kept.some(item => foldName(item.place_name) === foldName(place.name))) continue
     const sibling = kept.find(item => {
       const other = selected.find(placeItem => foldName(placeItem.name) === foldName(item.place_name))
       return other ? cardsTooSimilar(placeAsLike(other, item.clue), like) : false
     })
     if (sibling) continue
     const saved = await persistGeneratedCard(place, quest, city, country)
+    if (saved) kept.push(saved)
+  }
+  for (const place of remaining) {
+    const like = placeAsLike(place)
+    if (alreadyChosen.some(card => cardsTooSimilar(card, like))) continue
+    if (kept.some(item => foldName(item.place_name) === foldName(place.name))) continue
+    const saved = await persistGeneratedCard(place, fallbackQuest(place.category, place, city), city, country)
     if (saved) kept.push(saved)
   }
   return kept
@@ -1625,10 +1651,12 @@ function mergeCards(base: CatalogCard[], extra: CatalogCard[]) {
   return next
 }
 
-function fillFromCatalog(catalog: CatalogCard[], already: CatalogCard[], needed: number) {
+function fillFromCatalog(catalog: CatalogCard[], already: CatalogCard[], needed: number, interests?: string[]) {
   const extra: CatalogCard[] = []
+  const wanted = interests && interests.length > 0 ? new Set(interests) : null
   for (const card of catalog) {
     if (extra.length >= needed) break
+    if (wanted && !wanted.has(card.category)) continue
     if (!questHasPlaceFacts(catalogToQuest(card))) continue
     if (already.some(item => item.id === card.id) || extra.some(item => item.id === card.id)) continue
     extra.push(card)
@@ -1732,14 +1760,14 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
 
     const wanted = interests.reduce((sum, interest) => sum + (counts[interest] || 1), 0)
     if (selectedCards.length < wanted) {
-      selectedCards = mergeCards(selectedCards, fillFromCatalog(catalog, selectedCards, wanted - selectedCards.length))
+      selectedCards = mergeCards(selectedCards, fillFromCatalog(catalog, selectedCards, wanted - selectedCards.length, interests))
     }
 
     if (selectedCards.length === 0) {
       await mintBaseCardsForCity(city, country, { min: Math.max(3, wanted), priorCases, preferences })
       catalog = await loadPlaceCards(city, country)
       takeMatching(false)
-      selectedCards = mergeCards(selectedCards, fillFromCatalog(catalog, selectedCards, wanted || 1))
+      selectedCards = mergeCards(selectedCards, fillFromCatalog(catalog, selectedCards, wanted || 1, interests))
     }
 
     if (selectedCards.length === 0) {

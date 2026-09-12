@@ -1,3 +1,14 @@
+import tls from 'node:tls'
+
+try {
+  tls.setDefaultCACertificates([
+    ...tls.getCACertificates(),
+    ...tls.getCACertificates('system'),
+  ])
+} catch {
+  // Node without system CA merge still geocodes when the host already trusts OSM.
+}
+
 const NOMINATIM = 'https://nominatim.openstreetmap.org/search'
 const OVERPASS = [
   'https://overpass-api.de/api/interpreter',
@@ -5,6 +16,7 @@ const OVERPASS = [
   'https://overpass.osm.ch/api/interpreter',
 ]
 const USER_AGENT = 'MotME/1.0 (Mystery of the Midnight Express; place catalog)'
+const GENERIC_GEO = new Set(['city', 'town', 'district', 'province', 'county', 'region', 'municipality', 'village', 'area'])
 
 export type OsmPlace = {
   id: string
@@ -48,6 +60,38 @@ function osmAddress(tags: Record<string, string>, city: string, country: string)
   return [...new Set(parts)].join(', ')
 }
 
+export function geocodeQueries(city: string, country: string): string[] {
+  const raw = city.trim()
+  const stripped = raw.replace(/^[\s'"‘’‛′`ʿʾ]+/u, '').replace(/[\s'"‘’‛′`]+$/u, '').trim()
+  const folded = raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .trim()
+  const tokens = folded.split(/\s+/).filter(token => token.length >= 4 && !GENERIC_GEO.has(token.toLowerCase()))
+  const last = tokens[tokens.length - 1]
+  const withCountry = (name: string) => (country ? `${name}, ${country}` : name)
+  return [...new Set([
+    withCountry(raw),
+    stripped && stripped !== raw ? withCountry(stripped) : '',
+    folded && folded.toLowerCase() !== raw.toLowerCase() ? withCountry(folded) : '',
+    last && tokens.length > 1 ? withCountry(last) : '',
+  ].filter(Boolean))]
+}
+
+export function citySearchLabels(city: string): string[] {
+  const raw = city.trim()
+  const stripped = raw.replace(/^[\s'"‘’‛′`ʿʾ]+/u, '').replace(/[\s'"‘’‛′`]+$/u, '').trim()
+  const folded = raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .trim()
+  const tokens = folded.split(/\s+/).filter(token => token.length >= 4 && !GENERIC_GEO.has(token.toLowerCase()))
+  const last = tokens[tokens.length - 1]
+  return [...new Set([raw, stripped, last && tokens.length > 1 ? last : ''].filter(Boolean))]
+}
+
 function classify(tags: Record<string, string>): { category: string; types: string[]; primaryType: string; summary: string } | null {
   const tourism = tags.tourism || ''
   const amenity = tags.amenity || ''
@@ -55,17 +99,26 @@ function classify(tags: Record<string, string>): { category: string; types: stri
   const historic = tags.historic || ''
   const shop = tags.shop || ''
   const natural = tags.natural || ''
-  const types = [tourism, amenity, leisure, historic, shop, natural, tags.building].filter(Boolean)
+  const waterway = tags.waterway || ''
+  const building = tags.building || ''
+  const religion = tags.religion || ''
+  const types = [tourism, amenity, leisure, historic, shop, natural, waterway, building, religion].filter(Boolean)
   const summary = (tags['description:en'] || tags.description || tags.note || '').trim()
 
-  if (tourism === 'museum' || amenity === 'arts_centre' || tourism === 'gallery') {
+  if (tourism === 'museum' || amenity === 'arts_centre' || tourism === 'gallery' || amenity === 'library') {
     return { category: 'Museums', types, primaryType: tourism || amenity || 'museum', summary }
   }
   if (['restaurant', 'cafe', 'fast_food', 'food_court', 'ice_cream'].includes(amenity) || shop === 'bakery' || amenity === 'marketplace') {
     return { category: 'Food', types, primaryType: amenity || shop || 'restaurant', summary }
   }
-  if (['park', 'garden', 'nature_reserve', 'beach_resort'].includes(leisure) || natural || leisure === 'marina') {
-    return { category: 'Nature', types, primaryType: leisure || natural || 'park', summary }
+  if (
+    ['park', 'garden', 'nature_reserve', 'beach_resort'].includes(leisure) ||
+    ['wood', 'water', 'peak', 'beach', 'wetland', 'grassland'].includes(natural) ||
+    leisure === 'marina' ||
+    waterway === 'river' ||
+    amenity === 'fountain'
+  ) {
+    return { category: 'Nature', types, primaryType: leisure || natural || waterway || 'park', summary }
   }
   if (['bar', 'pub', 'nightclub', 'biergarten', 'theatre', 'casino'].includes(amenity) || tourism === 'hotel') {
     return { category: 'Nightlife', types, primaryType: amenity || tourism, summary }
@@ -73,17 +126,27 @@ function classify(tags: Record<string, string>): { category: string; types: stri
   if (shop || amenity === 'marketplace') {
     return { category: 'Shopping', types, primaryType: shop || 'shop', summary }
   }
-  if (historic || ['attraction', 'viewpoint', 'artwork', 'monument', 'yes'].includes(tourism) || tags.building === 'cathedral' || tags.building === 'church') {
-    return { category: 'Landmarks', types, primaryType: historic || tourism || tags.building || 'attraction', summary }
+  if (
+    historic ||
+    ['attraction', 'viewpoint', 'artwork', 'monument', 'yes'].includes(tourism) ||
+    ['cathedral', 'church', 'mosque', 'temple'].includes(building) ||
+    amenity === 'place_of_worship' ||
+    amenity === 'townhall' ||
+    amenity === 'community_centre' ||
+    amenity === 'school' ||
+    religion
+  ) {
+    return { category: 'Landmarks', types, primaryType: historic || tourism || amenity || building || 'attraction', summary }
   }
   return null
 }
 
-async function nominatimGeocode(city: string, country: string) {
+async function nominatimSearch(query: string, limit = 1) {
   const url = new URL(NOMINATIM)
-  url.searchParams.set('q', `${city}, ${country}`)
+  url.searchParams.set('q', query)
   url.searchParams.set('format', 'jsonv2')
-  url.searchParams.set('limit', '1')
+  url.searchParams.set('limit', String(limit))
+  url.searchParams.set('addressdetails', '1')
   const res = await enqueue(() =>
     fetch(url, {
       headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
@@ -91,21 +154,93 @@ async function nominatimGeocode(city: string, country: string) {
     }),
   )
   if (!res.ok) throw new Error(`Nominatim ${res.status}`)
-  const data = (await res.json()) as Array<{ lat?: string; lon?: string; display_name?: string }>
-  const hit = data[0]
-  const lat = Number(hit?.lat)
-  const lng = Number(hit?.lon)
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
-  return { lat, lng, label: hit?.display_name || `${city}, ${country}` }
+  return (await res.json()) as Array<{
+    lat?: string
+    lon?: string
+    display_name?: string
+    name?: string
+    type?: string
+    class?: string
+    category?: string
+    osm_type?: string
+    osm_id?: number
+    boundingbox?: string[]
+    address?: { state?: string; county?: string; country?: string }
+  }>
 }
 
-async function overpassAround(lat: number, lng: number) {
-  const query = `[out:json][timeout:20];
+async function nominatimGeocode(city: string, country: string) {
+  for (const query of geocodeQueries(city, country)) {
+    const data = await nominatimSearch(query, 1)
+    const hit = data[0]
+    const lat = Number(hit?.lat)
+    const lng = Number(hit?.lon)
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
+    const bbox = parseBBox(hit?.boundingbox)
+    const parent = await nominatimReverse(lat, lng)
+    return {
+      lat,
+      lng,
+      label: hit?.display_name || query,
+      state: parent?.state || hit?.address?.state,
+      county: parent?.county || hit?.address?.county,
+      bbox: bbox || parent?.bbox,
+    }
+  }
+  return null
+}
+
+function parseBBox(raw?: string[]) {
+  if (!raw || raw.length < 4) return null
+  const south = Number(raw[0])
+  const north = Number(raw[1])
+  const west = Number(raw[2])
+  const east = Number(raw[3])
+  if (![south, north, west, east].every(Number.isFinite)) return null
+  return { south, north, west, east }
+}
+
+async function nominatimReverse(lat: number, lng: number) {
+  const url = new URL('https://nominatim.openstreetmap.org/reverse')
+  url.searchParams.set('lat', String(lat))
+  url.searchParams.set('lon', String(lng))
+  url.searchParams.set('format', 'jsonv2')
+  url.searchParams.set('zoom', '8')
+  url.searchParams.set('addressdetails', '1')
+  url.searchParams.set('accept-language', 'en')
+  const res = await enqueue(() =>
+    fetch(url, {
+      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+      signal: AbortSignal.timeout(20000),
+    }),
+  )
+  if (!res.ok) return null
+  const data = (await res.json()) as {
+    display_name?: string
+    boundingbox?: string[]
+    address?: { state?: string; county?: string; country?: string }
+  }
+  return {
+    state: data.address?.state,
+    county: data.address?.county,
+    bbox: parseBBox(data.boundingbox),
+    label: data.display_name,
+  }
+}
+
+async function overpassAround(lat: number, lng: number, bbox?: { south: number; north: number; west: number; east: number } | null, radius = 12000) {
+  const area = bbox
+    ? `(${bbox.south},${bbox.west},${bbox.north},${bbox.east})`
+    : `(around:${radius},${lat},${lng})`
+  const query = `[out:json][timeout:25];
 (
-  nwr["tourism"~"attraction|museum|gallery|artwork|viewpoint|monument"](around:7000,${lat},${lng});
-  nwr["historic"](around:7000,${lat},${lng});
-  nwr["amenity"~"restaurant|cafe|marketplace|arts_centre"](around:7000,${lat},${lng});
-  nwr["leisure"~"park|garden|nature_reserve"](around:7000,${lat},${lng});
+  nwr["tourism"]${area};
+  nwr["historic"]${area};
+  nwr["amenity"~"restaurant|cafe|marketplace|arts_centre|place_of_worship|townhall|community_centre|school|library|fountain"]${area};
+  nwr["leisure"~"park|garden|nature_reserve|marina"]${area};
+  nwr["shop"]${area};
+  nwr["natural"~"wood|water|peak|beach|wetland"]${area};
+  nwr["waterway"="river"]${area};
 );
 out center;`
   let lastError = 'Overpass failed'
@@ -130,6 +265,91 @@ out center;`
     }
   }
   throw new Error(lastError)
+}
+
+function nominatimHitToPlace(
+  hit: {
+    lat?: string
+    lon?: string
+    display_name?: string
+    name?: string
+    type?: string
+    class?: string
+    category?: string
+    osm_type?: string
+    osm_id?: number
+  },
+  city: string,
+  country: string,
+): OsmPlace | null {
+  const name = (hit.name || hit.display_name?.split(',')[0] || '').trim()
+  if (!name) return null
+  const kind = hit.class || hit.category || ''
+  if (kind === 'place' || kind === 'boundary' || kind === 'highway' || kind === 'railway') return null
+  if (['administrative', 'city', 'town', 'village', 'county', 'state', 'tertiary', 'secondary', 'primary', 'residential', 'track', 'path', 'unclassified', 'service'].includes(hit.type || '')) {
+    return null
+  }
+  const tags: Record<string, string> = {}
+  if (['amenity', 'tourism', 'leisure', 'historic', 'shop', 'natural', 'waterway'].includes(kind)) {
+    tags[kind] = hit.type || kind
+  } else if (hit.type) {
+    tags.amenity = hit.type
+    if (hit.type !== 'administrative') tags.tourism = hit.type
+  }
+  const classified = classify(tags) || {
+    category: 'Landmarks',
+    types: [hit.type || 'attraction'],
+    primaryType: hit.type || 'attraction',
+    summary: '',
+  }
+  const lat = Number(hit.lat)
+  const lng = Number(hit.lon)
+  return {
+    id: hit.osm_id ? `osm:${hit.osm_type || 'node'}:${hit.osm_id}` : `osm:nominatim:${foldId(name)}`,
+    name,
+    address: hit.display_name || osmAddress({}, city, country),
+    types: classified.types,
+    summary: classified.summary,
+    rating: null,
+    ratings: 0,
+    primaryType: classified.primaryType,
+    lat: Number.isFinite(lat) ? lat : undefined,
+    lng: Number.isFinite(lng) ? lng : undefined,
+    category: classified.category,
+  }
+}
+
+function foldId(text: string) {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+}
+
+async function nominatimPois(city: string, country: string, region?: string): Promise<OsmPlace[]> {
+  const cityLabels = citySearchLabels(city)
+  const regionName = region?.replace(/\s+Province$/i, '').replace(/\s+Governorate$/i, '').trim()
+  const labels = [...new Set([regionName, cityLabels[cityLabels.length - 1]].filter(Boolean))]
+  const terms = ['mosque', 'park', 'river', 'school', 'market']
+  const places: OsmPlace[] = []
+  const seen = new Set<string>()
+  for (const focus of labels) {
+    for (const term of terms) {
+      if (places.length >= 16) return places
+      try {
+        const hits = await nominatimSearch(`${term} ${focus}, ${country}`, 5)
+        for (const hit of hits) {
+          const place = nominatimHitToPlace(hit, city, country)
+          if (!place) continue
+          const key = place.name.toLowerCase()
+          if (seen.has(key) || seen.has(place.id)) continue
+          seen.add(key)
+          seen.add(place.id)
+          places.push(place)
+        }
+      } catch (error) {
+        console.error('Nominatim POI search failed:', error instanceof Error ? error.message : error)
+      }
+    }
+  }
+  return places
 }
 
 function elementToPlace(element: OsmElement, city: string, country: string): OsmPlace | null {
@@ -173,20 +393,29 @@ export async function loadOsmPlaces(city: string, country: string, bias?: { lat:
   if (pending) return pending
   const work = (async () => {
     const geo = bias && typeof bias.lat === 'number' && typeof bias.lng === 'number'
-      ? { lat: bias.lat, lng: bias.lng }
+      ? { ...(await nominatimReverse(bias.lat, bias.lng).catch(() => null)), lat: bias.lat, lng: bias.lng }
       : await nominatimGeocode(city, country)
     if (!geo) return []
-    const elements = await overpassAround(geo.lat, geo.lng)
+    let elements: OsmElement[] = []
+    try {
+      elements = await overpassAround(geo.lat, geo.lng, 'bbox' in geo ? geo.bbox ?? null : null)
+    } catch (error) {
+      console.error(`Overpass failed for ${city}, ${country}:`, error instanceof Error ? error.message : error)
+    }
     const seen = new Set<string>()
     const places: OsmPlace[] = []
-    for (const element of elements) {
-      const place = elementToPlace(element, city, country)
-      if (!place) continue
+    const add = (place: OsmPlace | null) => {
+      if (!place) return
       const fold = place.name.toLowerCase()
-      if (seen.has(fold) || seen.has(place.id)) continue
+      if (seen.has(fold) || seen.has(place.id)) return
       seen.add(fold)
       seen.add(place.id)
       places.push(place)
+    }
+    for (const element of elements) add(elementToPlace(element, city, country))
+    if (places.length < 8) {
+      const region = 'state' in geo ? geo.state : undefined
+      for (const place of await nominatimPois(city, country, region)) add(place)
     }
     return places
   })().catch(error => {
