@@ -5,15 +5,13 @@ import { clerkSecretKey, db } from '../../src/db/client'
 import { profiles, questRecords, trips } from '../../src/db/schema'
 import {
   albumPhotoKey,
-  dataUrlToBuffer,
-  getPhotoBytes,
   hasObjectStorage,
   isDataUrl,
-  isSafeAlbumKey,
   photoKeyFromUrl,
   photoProxyPath,
   uploadDataUrl,
 } from './storage'
+import { serveAlbumPhoto } from './serve-photo'
 
 type QuestPayload = {
   id: string
@@ -141,45 +139,11 @@ async function serializeTrip(trip: typeof trips.$inferSelect) {
   }
 }
 
-async function servePhoto(key: string, res: ServerResponse) {
-  if (!isSafeAlbumKey(key)) {
-    send(res, 400, { error: 'Invalid photograph key' })
-    return
-  }
-
-  if (hasObjectStorage()) {
-    try {
-      const object = await getPhotoBytes(key)
-      if (object) {
-        res.statusCode = 200
-        res.setHeader('Content-Type', object.contentType)
-        res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800')
-        res.end(object.body)
-        return
-      }
-    } catch {
-      // Fall through to database copies.
-    }
-  }
-
-  const rows = await db.select().from(questRecords).where(eq(questRecords.photoKey, key))
-  const inline = rows[0]?.photoData ? dataUrlToBuffer(rows[0].photoData) : null
-  if (inline) {
-    res.statusCode = 200
-    res.setHeader('Content-Type', inline.contentType)
-    res.setHeader('Cache-Control', 'private, max-age=3600')
-    res.end(inline.body)
-    return
-  }
-
-  send(res, 404, { error: 'Photograph not found' })
-}
-
 export async function handlePersistApi(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   const url = new URL(req.url || '/', 'http://localhost')
   const photoPath = url.pathname === '/api/photo' || url.pathname === '/photo'
   if (photoPath && (req.method === 'GET' || req.method === 'HEAD')) {
-    await servePhoto(url.searchParams.get('k') || '', res)
+    await serveAlbumPhoto(url.searchParams.get('k') || '', res)
     return true
   }
 

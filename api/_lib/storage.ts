@@ -1,5 +1,3 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { loadDotEnv } from '../../src/db/client'
 
 const BUCKET = 'pictures'
@@ -28,11 +26,12 @@ export function hasObjectStorage() {
   return Boolean(config.accessKeyId && config.secretAccessKey && config.endpoint)
 }
 
-function createS3() {
+async function createS3() {
   const config = storageConfig()
   if (!config.accessKeyId || !config.secretAccessKey || !config.endpoint) {
     throw new Error('Neon object storage credentials are not set')
   }
+  const { S3Client } = await import('@aws-sdk/client-s3')
   return new S3Client({
     forcePathStyle: true,
     region: config.region,
@@ -84,8 +83,9 @@ export function photoKeyFromUrl(value: string | null | undefined) {
 export async function uploadDataUrl(key: string, dataUrl: string) {
   const match = dataUrl.match(DATA_URL_RE)
   if (!match) return false
+  const { PutObjectCommand } = await import('@aws-sdk/client-s3')
   const body = Buffer.from(match[2], 'base64')
-  await createS3().send(
+  await (await createS3()).send(
     new PutObjectCommand({
       Bucket: BUCKET,
       Key: key,
@@ -98,7 +98,8 @@ export async function uploadDataUrl(key: string, dataUrl: string) {
 }
 
 export async function getPhotoBytes(key: string) {
-  const response = await createS3().send(new GetObjectCommand({ Bucket: BUCKET, Key: key }))
+  const { GetObjectCommand } = await import('@aws-sdk/client-s3')
+  const response = await (await createS3()).send(new GetObjectCommand({ Bucket: BUCKET, Key: key }))
   const bytes = await response.Body?.transformToByteArray()
   if (!bytes) return null
   return {
@@ -108,7 +109,9 @@ export async function getPhotoBytes(key: string) {
 }
 
 export async function signedPhotoUrl(key: string) {
-  return getSignedUrl(createS3(), new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn: 60 * 60 })
+  const { GetObjectCommand } = await import('@aws-sdk/client-s3')
+  const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
+  return getSignedUrl(await createS3(), new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn: 60 * 60 })
 }
 
 export function isDataUrl(value: string | null | undefined) {

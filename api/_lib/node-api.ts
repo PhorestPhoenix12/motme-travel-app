@@ -32,3 +32,15 @@ export async function runNodeApi(
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'API failed' }))
   }
 }
+
+export async function runPersistApi(req: IncomingMessage, res: ServerResponse, fallbackPath: string) {
+  try {
+    const { handlePersistApi } = await import('./persist-api')
+    await runNodeApi(withApiPath(req, fallbackPath), res, handlePersistApi)
+  } catch (error) {
+    if (res.headersSent) return
+    res.statusCode = 500
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'API failed' }))
+  }
+}
