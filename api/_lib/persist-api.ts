@@ -183,38 +183,23 @@ async function filePlaceCard(quest: QuestPayload, city: string, country: string)
   return saved?.id || null
 }
 
-function questFromMark(mark: TripCase, card?: typeof placeCards.$inferSelect): QuestPayload {
-  if (card) {
-    return {
-      id: mark.id,
-      category: card.category,
-      title: card.title,
-      hints: [card.hint1, card.hint2, card.hint3],
-      unlockedHints: mark.unlockedHints,
-      solved: mark.solved,
-      photoUrl: mark.photoKey ? photoProxyPath(mark.photoKey) : mark.photoData || null,
-      note: mark.note,
-      liked: mark.liked,
-      placeCardId: card.id,
-      placeName: card.googlePlaceName,
-      placeAddress: card.address,
-      placeTypes: card.placeTypes,
-      placeType: placeTypeLabel(card.placeTypes, card.primaryType, card.category) || card.primaryType,
-      placeDescription: card.geminiDescription || card.googleSummary,
-      identification: mark.identification || undefined,
-    }
-  }
+function questFromMark(mark: TripCase, card: typeof placeCards.$inferSelect): QuestPayload {
   return {
     id: mark.id,
-    category: mark.category || 'Landmarks',
-    title: mark.title || 'The File Without a Cover',
-    hints: mark.hints || [],
+    category: card.category,
+    title: card.title,
+    hints: [card.hint1, card.hint2, card.hint3],
     unlockedHints: mark.unlockedHints,
     solved: mark.solved,
     photoUrl: mark.photoKey ? photoProxyPath(mark.photoKey) : mark.photoData || null,
     note: mark.note,
     liked: mark.liked,
-    placeCardId: mark.placeCardId || undefined,
+    placeCardId: card.id,
+    placeName: card.googlePlaceName,
+    placeAddress: card.address,
+    placeTypes: card.placeTypes,
+    placeType: placeTypeLabel(card.placeTypes, card.primaryType, card.category) || card.primaryType,
+    placeDescription: card.geminiDescription || card.googleSummary,
     identification: mark.identification || undefined,
   }
 }
@@ -230,7 +215,10 @@ async function serializeTrip(trip: typeof trips.$inferSelect) {
     country: trip.country,
     city: trip.city,
     keys: trip.keys,
-    quests: marks.map(mark => questFromMark(mark, mark.placeCardId ? byId.get(mark.placeCardId) : undefined)),
+    quests: marks.flatMap(mark => {
+      const card = mark.placeCardId ? byId.get(mark.placeCardId) : undefined
+      return card ? [questFromMark(mark, card)] : []
+    }),
   }
 }
 
@@ -364,7 +352,9 @@ export async function handlePersistApi(req: IncomingMessage, res: ServerResponse
           photoData = photoKey ? null : photoData
         }
         const placeCardId = await filePlaceCard({ ...quest, placeCardId: quest.placeCardId || previous?.placeCardId }, data.city, data.country)
-        nextCases.push(markFromQuest({ ...quest, placeCardId: placeCardId || quest.placeCardId }, previous, { photoKey, photoData }))
+        const resolvedId = uuidOrNull(placeCardId || quest.placeCardId || previous?.placeCardId)
+        if (!resolvedId) continue
+        nextCases.push(markFromQuest({ ...quest, placeCardId: resolvedId }, previous, { photoKey, photoData }))
       }
 
       const [trip] = await db

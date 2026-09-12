@@ -4,7 +4,6 @@ import AccountPage from './AccountPage'
 import AlbumPage from './AlbumPage'
 import IntroPage, { AuthGateSplash, ClerkIntroPage } from './IntroPage'
 import { countryByName } from './data/countries'
-import { QUEST_VARIANTS } from './data/quest-variants'
 import { guessFitsCase } from './lib/identify'
 import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadProfileRemote, loadTripLocal, loadTripRemote, mergeTripPhotos, persistTrip, secretForQuest, uploadQuestPhoto, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
 import { createCitySession, listCities, resolveCity, searchCountries, suggestCities, type CitySuggestion } from './lib/destinations'
@@ -54,32 +53,6 @@ const INTEREST_META: { id: Interest; label: string; code: string }[] = [
   { id: 'Shopping',     label: 'Markets',     code: 'VII' },
 ]
 
-function buildQuests(interests: Interest[], counts?: Record<Interest, number>, city = ""): Quest[] {
-  const where = city.trim() || "this city"
-  const list: Quest[] = []
-  for (const interest of interests) {
-    const n = Math.max(1, counts?.[interest] ?? 1)
-    const variants = QUEST_VARIANTS[interest]
-    for (let copy = 0; copy < n; copy += 1) {
-      const variant = variants[copy % variants.length]
-      list.push({
-        id: `q${list.length}`,
-        category: interest,
-        title: variant.title,
-        hints: variant.hints.map(hint => hint.replace(/\{city\}/g, where)),
-        unlockedHints: 1,
-        solved: false,
-        photoUrl: null,
-        note: "",
-        liked: null,
-        justUnlocked: false,
-        justSolved: false,
-      })
-    }
-  }
-  return list.slice(0, MAX_CASES_PER_DOSSIER)
-}
-
 async function buildQuestsFromApi(
   country: string,
   city: string,
@@ -120,6 +93,7 @@ async function buildQuestsFromApi(
     const address = (q.place_address || '').trim()
     const type = (q.place_type || q.place_types?.[0] || '').trim()
     const description = (q.description || q.gemini_description || '').trim()
+    if (!q.place_card_id) return false
     if (!venue || venue.toLowerCase() === 'unknown place' || !address || !type || !description) return false
     const title = (q.title || '').trim().toLowerCase()
     const clue = (q.clue || q.hints?.[0] || '').trim().toLowerCase()
@@ -129,8 +103,8 @@ async function buildQuestsFromApi(
     seen.add(key)
     if (title) seen.add(`title:${title}`)
     return true
-  }).map((q, i) => ({
-    id: q.place_card_id || `q${i}`,
+  }).map(q => ({
+    id: q.place_card_id as string,
     category: q.category as Interest,
     title: q.title || 'The File Without a Cover',
     placeCardId: q.place_card_id,
@@ -1568,78 +1542,20 @@ function QuestCard({ quest, keys, onOpen, onSpendKey }: { quest: Quest; keys: nu
    ROOT APP
 ═══════════════════════════════════════════════════════════ */
 
-function isLegacyTemplateQuest(quest: { title?: string; hints?: string[]; placeName?: string }) {
-  if (quest.placeName) return false
-  const title = quest.title || ""
-  const text = (quest.hints || []).join(" ")
-  return (
-    /not the same walk as the other/i.test(text) ||
-    /this file follows /i.test(text) ||
-    /stones here remember every secret/i.test(text) ||
-    /the sentinel of the old quarter/i.test(title) ||
-    /the spice merchant/i.test(title) ||
-    /the gallery of buried hours/i.test(title) ||
-    /the garden of unfinished maps/i.test(title) ||
-    /the lantern and the last round/i.test(title) ||
-    /the facade with two centuries/i.test(title) ||
-    /the market of last objects/i.test(title)
-  )
-}
-
-function refreshTemplateQuest(quest: Quest, city: string): Quest {
-  const variants = QUEST_VARIANTS[quest.category]
-  if (!variants?.length || quest.placeName) return migrateLegacyTemplateQuest(quest, city)
-  const where = city.trim() || "this city"
-  const byTitle = variants.find(variant => variant.title === quest.title)
-  if (byTitle) {
-    return {
-      ...quest,
-      hints: byTitle.hints.map(hint => hint.replace(/\{city\}/g, where)),
-    }
-  }
-  return migrateLegacyTemplateQuest(quest, city)
-}
-
-function migrateLegacyTemplateQuest(quest: Quest, city: string): Quest {
-  if (!isLegacyTemplateQuest(quest)) return quest
-  const variants = QUEST_VARIANTS[quest.category]
-  if (!variants?.length) return quest
-  const trails = [
-    "the northeast approach",
-    "the canal-side lane",
-    "the hill above the station",
-    "the market quarter",
-    "the old walls",
-    "the far bridge",
-    "the quieter sestiere",
-    "the garden edge",
-    "the last cafe before the depot",
-    "the last café before the depot",
-    "the courtyard behind the laundry",
-  ]
-  const text = quest.hints.join(" ").toLowerCase()
-  let index = trails.findIndex(trail => text.includes(trail))
-  if (index === 9) index = 8
-  if (index < 0) index = 0
-  const variant = variants[index % variants.length]
-  const where = city.trim() || "this city"
-  return {
-    ...quest,
-    title: variant.title,
-    hints: variant.hints.map(hint => hint.replace(/\{city\}/g, where)),
-  }
-}
-
 function toStoredQuests(items: Quest[]): StoredQuest[] {
-  return items.map(({ justUnlocked: _u, justSolved: _s, ...quest }) => quest)
+  return items
+    .filter(quest => Boolean(quest.placeCardId))
+    .map(({ justUnlocked: _u, justSolved: _s, ...quest }) => quest)
 }
 
 function fromStoredTrip(trip: StoredTrip): Quest[] {
-  return trip.quests.map(quest => {
+  return trip.quests.flatMap(quest => {
+    if (!quest.placeCardId) return []
     const secret = secretForQuest(trip.city, trip.country, quest)
-    return refreshTemplateQuest({
+    return [{
       ...quest,
       category: quest.category as Interest,
+      placeCardId: quest.placeCardId,
       placeName: secret.placeName || quest.placeName,
       placeAddress: secret.placeAddress || quest.placeAddress,
       placeType: secret.placeType || quest.placeType,
@@ -1647,7 +1563,7 @@ function fromStoredTrip(trip: StoredTrip): Quest[] {
       placeDescription: secret.placeDescription || quest.placeDescription,
       justUnlocked: false,
       justSolved: false,
-    }, trip.city)
+    }]
   })
 }
 
@@ -1684,14 +1600,17 @@ function AppShell({
   const [quests, setQuests] = useState<Quest[]>([])
   const [keys, setKeys] = useState(0)
   const [savedTrips, setSavedTrips] = useState<StoredTrip[]>([])
+  const [generating, setGenerating] = useState(false)
+  const [briefingError, setBriefingError] = useState('')
   const hydrated = useRef(false)
 
   const applyTrip = useCallback((trip: StoredTrip) => {
+    const filed = fromStoredTrip(trip)
     setCountry(trip.country)
     setCity(trip.city)
     setKeys(trip.keys)
-    setQuests(fromStoredTrip(trip))
-    if (trip.quests.length > 0) setPage(current => (current === 'route' ? 'cases' : current))
+    setQuests(filed)
+    if (filed.length > 0) setPage(current => (current === 'route' ? 'cases' : current))
   }, [])
 
   useEffect(() => {
@@ -1719,22 +1638,18 @@ function AppShell({
   }, [applyTrip, clerkReady, getToken])
 
   useEffect(() => {
-    if (!hydrated.current || !country || quests.length === 0) return
-    const trip: StoredTrip = { country, city, keys, quests: toStoredQuests(quests) }
+    if (!hydrated.current || !country || generating || quests.length === 0) return
+    const stored = toStoredQuests(quests)
+    if (stored.length === 0) return
+    const trip: StoredTrip = { country, city, keys, quests: stored }
     setSavedTrips(prev => {
       const next = prev.filter(item => !(item.country === country && item.city === city))
       return [trip, ...next]
     })
     void getToken().then(token => persistTrip(token, trip))
-  }, [city, country, getToken, keys, quests])
-
-  const [generating, setGenerating] = useState(false)
-  const [briefingError, setBriefingError] = useState('')
+  }, [city, country, generating, getToken, keys, quests])
 
   const handleBegin = useCallback(async (c: string, ct: string, interests: Interest[], counts: Record<Interest, number>) => {
-    setCountry(c)
-    setCity(ct)
-    setKeys(0)
     setGenerating(true)
     setBriefingError('')
 
@@ -1766,6 +1681,9 @@ function AppShell({
       note: quest.note,
     })))
 
+    setCountry(c)
+    setCity(ct)
+    setKeys(0)
     setGenerating(false)
     setQuests(nextQuests)
     setPage('cases')

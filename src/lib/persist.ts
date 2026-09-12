@@ -125,10 +125,20 @@ export function collectPriorCases(trips: StoredTrip[]): PriorCase[] {
   return [...map.values()]
 }
 
+export function isFiledQuest(quest: { placeCardId?: string | null }) {
+  return Boolean(quest.placeCardId?.trim())
+}
+
+function filedTrip(trip: StoredTrip): StoredTrip {
+  return { ...trip, quests: trip.quests.filter(isFiledQuest) }
+}
+
 export function loadTripLocal(): StoredTrip | null {
   try {
     const raw = localStorage.getItem(TRIP_KEY)
-    return raw ? (JSON.parse(raw) as StoredTrip) : null
+    if (!raw) return null
+    const trip = filedTrip(JSON.parse(raw) as StoredTrip)
+    return trip.quests.length > 0 ? trip : null
   } catch {
     return null
   }
@@ -148,7 +158,7 @@ function slimTripForLocal(trip: StoredTrip): StoredTrip {
 }
 
 export function saveTripLocal(trip: StoredTrip) {
-  const slim = slimTripForLocal(trip)
+  const slim = slimTripForLocal(filedTrip(trip))
   try {
     localStorage.setItem(TRIP_KEY, JSON.stringify(slim))
   } catch {
@@ -192,21 +202,23 @@ export async function loadTripRemote(token: string | null, country?: string, cit
   const params = country && city ? `?country=${encodeURIComponent(country)}&city=${encodeURIComponent(city)}` : ''
   const res = await fetch(`/api/me/trip${params}`, { headers: await authHeaders(token) })
   if (!res.ok) return null
-  return (await res.json()) as StoredTrip | null
+  const trip = (await res.json()) as StoredTrip | null
+  return trip ? filedTrip(trip) : null
 }
 
 export async function loadAllTripsRemote(token: string | null): Promise<StoredTrip[]> {
   if (!token) return []
   const res = await fetch('/api/me/trips', { headers: await authHeaders(token) })
   if (!res.ok) return []
-  return (await res.json()) as StoredTrip[]
+  return ((await res.json()) as StoredTrip[]).map(filedTrip).filter(trip => trip.quests.length > 0)
 }
 
 export async function saveTripRemote(token: string | null, trip: StoredTrip): Promise<boolean> {
   if (!token) return false
+  const filed = filedTrip(trip)
   const payload: StoredTrip = {
-    ...trip,
-    quests: trip.quests.map(quest => ({
+    ...filed,
+    quests: filed.quests.map(quest => ({
       ...quest,
       photoUrl:
         quest.photoUrl?.startsWith('data:') && quest.photoUrl.length > 900_000

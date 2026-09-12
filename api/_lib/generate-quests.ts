@@ -191,6 +191,7 @@ const COMMON_WORDS = new Set([
  * 3. Each hint, with the city alone, must reverse to that exact venue.
  * 4. Served hints are the hint_1/2/3 columns on place_cards.
  * 5. Missing or preference-mismatched cards are minted, then filed, then served.
+ * 6. Never serve a case that is not a row in place_cards.
  */
 const NARRATOR_VOICE = `You are the night clerk of MotME — Mystery of the Midnight Express. You write sealed case-file clues in a 1930s rail-investigation voice.
 Never break character with modern app language. Never say "app", "tap", "GPS", "selfie", "unlock", "click", or "download".
@@ -1279,9 +1280,13 @@ async function persistGeneratedCard(
       gemini: complete.description ? 'gemini_description' : 'composed_description',
     },
   })
-  return saved
-    ? { ...complete, place_card_id: saved.id, gemini_description: saved.geminiDescription, description: saved.geminiDescription || complete.description }
-    : complete
+  if (!saved?.id) return null
+  return {
+    ...complete,
+    place_card_id: saved.id,
+    gemini_description: saved.geminiDescription,
+    description: saved.geminiDescription || complete.description,
+  }
 }
 
 const BASE_SPECIALTIES = ['Landmarks', 'Food', 'Museums', 'Nature']
@@ -1593,14 +1598,7 @@ async function enforceCaseRulesOnCards(
     }
     const saved = await persistGeneratedCard(places[index], quest, city, country)
     const [fresh] = saved?.place_card_id ? await loadPlaceCardsByIds([saved.place_card_id]) : []
-    next.push(fresh || {
-      ...card,
-      title: quest.title || card.title,
-      hint1: quest.clue,
-      hint2: quest.default_hint,
-      hint3: quest.bonus_hint,
-      geminiDescription: quest.description || card.geminiDescription,
-    })
+    next.push(fresh || card)
   }
   return next
 }
@@ -1760,12 +1758,12 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
     }
 
     selectedCards = await enforceCaseRulesOnCards(selectedCards, city, country, gemini)
-    const filed = await loadPlaceCardsByIds(selectedCards.map(card => card.id))
+    const filed = await loadPlaceCardsByIds(selectedCards.map(card => card.id).filter(Boolean))
     const seenVenues = new Set<string>()
-    const quests = (filed.length > 0 ? filed : selectedCards)
+    const quests = filed
       .map(catalogToQuest)
       .filter(quest => {
-        if (!questHasPlaceFacts(quest)) return false
+        if (!quest.place_card_id || !questHasPlaceFacts(quest)) return false
         const key = foldName(quest.place_name) || foldName(quest.title)
         if (!key || seenVenues.has(key)) return false
         seenVenues.add(key)
