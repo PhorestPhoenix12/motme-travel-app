@@ -12,8 +12,7 @@
       "maxDuration": 10
     },
     "api/destinations.ts": {
-      "maxDuration": 60,
-      "includeFiles": "src/data/**"
+      "maxDuration": 60
     },
     "api/generate-quests.ts": {
       "maxDuration": 60,
