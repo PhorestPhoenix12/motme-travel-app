@@ -1,7 +1,4 @@
-import type { ServerResponse } from 'node:http'
-import { eq } from 'drizzle-orm'
-import { db } from './db'
-import { questRecords } from './schema'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dataUrlToBuffer, getPhotoBytes, hasObjectStorage, isSafeAlbumKey } from './storage'
 
 function send(res: ServerResponse, status: number, body: unknown) {
@@ -32,6 +29,9 @@ export async function serveAlbumPhoto(key: string, res: ServerResponse) {
   }
 
   try {
+    const { eq } = await import('drizzle-orm')
+    const { db } = await import('./db')
+    const { questRecords } = await import('./schema')
     const rows = await db.select().from(questRecords).where(eq(questRecords.photoKey, key))
     const inline = rows[0]?.photoData ? dataUrlToBuffer(rows[0].photoData) : null
     if (inline) {

@@ -1,4 +1,4 @@
-import { loadDotEnv } from './db'
+import { loadDotEnv } from './env'
 
 const BUCKET = 'pictures'
 const DATA_URL_RE = /^data:([^;]+);base64,(.+)$/
