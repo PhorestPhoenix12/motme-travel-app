@@ -80,6 +80,8 @@ type GeneratedQuest = {
   category: string
   title: string
   place_name: string
+  place_address?: string
+  place_types?: string[]
   clue: string
   default_hint: string
   bonus_hint: string
@@ -163,15 +165,16 @@ const COMMON_WORDS = new Set([
   'street', 'avenue', 'place', 'plaza', 'city', 'old', 'new', 'grand', 'great', 'national',
 ])
 
-const NARRATOR_VOICE = `You are the narrator of MotME — Mystery of the Midnight Express, a detective-casebook travel app styled like a 1930s Orient Express investigation.
-You write atmospheric, noir-tinged mystery clues about real places for a traveler to go find in person.
+const NARRATOR_VOICE = `You are the night clerk of MotME — Mystery of the Midnight Express. You write sealed case-file clues in a 1930s rail-investigation voice.
 Never break character with modern app language. Never say "app", "tap", "GPS", "selfie", "unlock", "click", or "download".
-Never say the place's name outright — the player must deduce it. Do not use official names, common nicknames, or any token that would give the name away.
-Each of the 3 hints gets a bit more specific:
-1. Atmospheric and city-scale. Mood, light, rumor, a compass direction. A stranger could not walk straight there.
-2. Neighborhood, ritual, materials, or a local habit. A seasoned traveler would begin to narrow the field.
-3. Distinctive details a visitor would confirm on arrival — a view, a number, a sound, a worn threshold — still never the proper name.
-Titles are pulp case-file names, italic-ready and enigmatic. Never the venue's name.`
+Never say the place's official name, a common nickname, or any token that would give the name away.
+Every hint keeps mystery diction (clerk, file, sealed, porters, depot, briefing, evidence, classified) while staying factually clear.
+
+Hint 1 is 1–2 sentences that DIRECTLY state at least two of: function, appearance, history or age, location, significance. Facts first, atmosphere in the same breath. Example: "The night clerk stamps this on the 16th-century stone footbridge that still carries people over the canal; shops cling to both sides of the span."
+Do not open with empty poetry, "they say the stones", or a uniqueness disclaimer.
+Hint 2: how to recognize it from the pavement — materials, neighbors, doors — still as a briefing.
+Hint 3: a confirmation detail to file as evidence — still never the proper name.
+Titles are pulp case-file names. Never the venue's name.`
 
 function send(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status
@@ -539,38 +542,110 @@ async function geocodeCity(city: string, country: string, apiKey: string) {
   return { lat: hit.lat, lng: hit.lng }
 }
 
+function placeKind(place: PlaceCandidate): string {
+  const types = new Set([...(place.types || []), place.primaryType || ''].map(type => type.toLowerCase()))
+  if (types.has('bridge')) return 'historic bridge or crossing'
+  if (types.has('church') || types.has('place_of_worship') || types.has('hindu_temple') || types.has('mosque') || types.has('synagogue') || types.has('cathedral')) {
+    return 'church, temple, or civic place of worship'
+  }
+  if (types.has('city_hall') || types.has('local_government_office')) return 'town hall or civic building'
+  if (types.has('museum')) return 'museum'
+  if (types.has('art_gallery')) return 'gallery'
+  if (types.has('library')) return 'library or archive'
+  if (types.has('park') || types.has('campground')) return 'park or garden'
+  if (types.has('zoo') || types.has('aquarium')) return 'menagerie or aquarium'
+  if (types.has('restaurant')) return 'restaurant or trattoria'
+  if (types.has('cafe')) return 'cafe'
+  if (types.has('bakery')) return 'bakery or pastry shop'
+  if (types.has('bar') || types.has('liquor_store')) return 'bar or tavern'
+  if (types.has('night_club')) return 'late room with a floor or stage'
+  if (types.has('book_store')) return 'bookshop'
+  if (types.has('clothing_store') || types.has('shopping_mall')) return 'shop or emporium'
+  if (types.has('university')) return 'university building or college court'
+  if (types.has('tourist_attraction')) return 'public landmark'
+  return 'marked public place'
+}
+
+function streetOf(place: { address?: string; place_address?: string }) {
+  const address = place.address || place.place_address || ''
+  return address.split(',')[0]?.trim() || 'the listed street'
+}
+
+function stripMetaUniqueness(text: string) {
+  return text
+    .replace(/\s*This file follows[^.?!]*[.?!]/gi, '')
+    .replace(/\s*It is not the same walk[^.?!]*[.?!]/gi, '')
+    .replace(/\s*Unlike the other files[^.?!]*[.?!]/gi, '')
+    .replace(/\s*The other files aboard this train[^.?!]*[.?!]/gi, '')
+    .replace(/\s*This briefing concerns[^.?!]*; the other files[^.?!]*[.?!]/gi, '')
+    .replace(/\s*Do not confuse it with another door[^.?!]*[.?!]/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+function placeRole(place: PlaceCandidate): string {
+  const types = new Set([...(place.types || []), place.primaryType || ''].map(type => type.toLowerCase()))
+  if (types.has('bridge')) return 'still carries people over water'
+  if (types.has('church') || types.has('place_of_worship') || types.has('cathedral')) return 'still holds worship and marks the hours'
+  if (types.has('city_hall')) return "still houses the city's civic business"
+  if (types.has('museum') || types.has('art_gallery')) return "keeps the city's collections on public view"
+  if (types.has('library')) return 'is still used as a reading room'
+  if (types.has('park') || types.has('campground')) return 'is the green the city walks for air'
+  if (types.has('zoo') || types.has('aquarium')) return 'holds a living collection'
+  if (types.has('restaurant')) return "cooks the city's own food"
+  if (types.has('cafe')) return 'serves coffee and pastry to regulars'
+  if (types.has('bakery')) return 'still bakes for the street'
+  if (types.has('bar') || types.has('night_club')) return 'keeps late hours for the neighborhood'
+  if (types.has('book_store')) return 'still sells books from stacked rooms'
+  if (types.has('shopping_mall') || types.has('clothing_store')) return 'has long been a place to buy'
+  if (types.has('university')) return 'still teaches behind a historic facade'
+  if (types.has('tourist_attraction')) return 'is a public marker the city orients itself by'
+  return 'still stands in public use'
+}
+
+function placeLook(place: PlaceCandidate): string {
+  const types = new Set([...(place.types || []), place.primaryType || ''].map(type => type.toLowerCase()))
+  if (types.has('bridge')) return 'arches or iron bays over water'
+  if (types.has('church') || types.has('place_of_worship') || types.has('cathedral')) return 'stone walls and a tower, dome, or spire'
+  if (types.has('city_hall')) return 'a ceremonial civic facade'
+  if (types.has('museum') || types.has('art_gallery')) return 'a ticketed hall or palace front'
+  if (types.has('park')) return 'gated lawns, paths, and old trees'
+  if (types.has('restaurant') || types.has('cafe')) return 'a doorway and rooms made for sitting'
+  if (types.has('bakery')) return 'a window of bread or pastry'
+  if (types.has('bar') || types.has('night_club')) return 'a worn threshold and low interior light'
+  return 'a front you can match from the street'
+}
+
 function fallbackQuest(category: string, place: PlaceCandidate, city: string): GeneratedQuest {
   const district = place.address.split(',').slice(0, 2).join(', ').trim() || 'an unlisted quarter'
-  const street = place.address.split(',')[0]?.trim() || district
-  const material = place.types.includes('church') || place.types.includes('place_of_worship')
-    ? 'stone that has heard more confessions than trains'
-    : place.types.includes('park')
-      ? 'a hush of leaves where the city pretends to forget itself'
-      : place.types.includes('restaurant') || place.types.includes('cafe') || place.types.includes('bakery')
-        ? 'an aroma the locals follow without looking at a map'
-        : place.types.includes('bar') || place.types.includes('night_club')
-          ? 'lamplight and the last pour of the evening'
-          : place.types.includes('museum') || place.types.includes('art_gallery')
-            ? 'rooms that keep hours the railway never learned'
-            : 'a silhouette that has outlived several timetables'
+  const street = streetOf(place)
+  const kind = placeKind(place)
+  const fieldNote = place.summary
+    ? redactName(place.summary.replace(/\s+/g, ' ').trim(), place.name)
+    : ''
   const titleByCategory: Record<string, string> = {
-    Landmarks: 'The Sentinel That Keeps the Hour',
-    Food: "The Ledger of Salt and Smoke",
-    Museums: 'The Gallery of Unfiled Hours',
-    Nature: 'The Garden That Corrects the Map',
-    Nightlife: 'The Last Glass Before the Whistle',
-    Architecture: 'The Facade That Lies Politely',
-    Shopping: 'The Stall of Second Lives',
+    Landmarks: 'The File on the Public Marker',
+    Food: 'The File on the Local Kitchen',
+    Museums: 'The File on the Quiet Rooms',
+    Nature: 'The File on Open Ground',
+    Nightlife: 'The File on After Hours',
+    Architecture: 'The File on the Standing Work',
+    Shopping: 'The File on the Working Counter',
   }
+  const clue = fieldNote
+    ? `The night clerk files this on the ${kind} at ${street}: ${fieldNote}`
+    : `The night clerk files this on the ${kind} at ${street} — it ${placeRole(place)}. Look for ${placeLook(place)}.`
   return {
     category,
     title: `${titleByCategory[category] || 'The File Without a Cover'} — ${street}`,
     place_name: place.name,
-    clue: `The Midnight Express does not deliver you to a name. In ${city}, follow ${material} toward ${street}. Word among the porters is that this file, unlike the others, sits in ${district}.`,
-    default_hint: `Narrow your search toward ${district}. Those who keep regular hours pass it without looking up; those who arrive off the night train feel it before they see it. Do not confuse it with another door already named in this briefing.`,
-    bonus_hint: place.summary
-      ? redactName(`Confirm the site by this field note, stripped of its proper name: ${place.summary} If a plaque or worn threshold agrees, you have the right door — the one in ${street}.`, place.name)
-      : `Stand where the light falls most severely at ${street}. Count what the builders repeated — arches, windows, or steps. The number will not be fashionable. File what you find.`,
+    place_address: place.address,
+    place_types: place.types,
+    clue,
+    default_hint: `From the pavement in ${district}, match the ${kind} whose address begins ${street}. Neighbors, materials, and the way the door meets the street are the tells in this briefing.`,
+    bonus_hint: fieldNote
+      ? `On arrival, file this against what you see at ${street}: ${fieldNote} That match is the seal on the case.`
+      : `Stand at ${street} and file one detail a copyist could not steal from another ${kind} in ${city} — a number, a view, a worn threshold, or a neighbor you can name by trade.`,
   }
 }
 
@@ -585,8 +660,11 @@ function ensureDistinctQuests(quests: GeneratedQuest[]): GeneratedQuest[] {
     if (venue && venues.has(venue)) continue
     if (venue) venues.add(venue)
 
-    const street = (quest.place_address || '').split(',')[0]?.trim() || quest.place_name
-    let title = quest.title
+    const street = streetOf({
+      place_address: quest.place_address,
+    })
+
+    let title = stripMetaUniqueness(quest.title)
     let titleKey = foldName(title)
     if (!titleKey || titles.has(titleKey)) {
       title = `${title.replace(/ — .*$/, '')} — ${street}`
@@ -594,20 +672,21 @@ function ensureDistinctQuests(quests: GeneratedQuest[]): GeneratedQuest[] {
     }
     titles.add(titleKey)
 
-    let clue = quest.clue
+    let clue = stripMetaUniqueness(quest.clue)
     let clueKey = foldName(clue)
-    if (!clueKey || clues.has(clueKey)) {
-      clue = `${clue} This briefing concerns ${street}; the other files aboard this train lead elsewhere.`
+    if (!clueKey || clues.has(clueKey) || (street && !foldName(clue).includes(foldName(street).split(' ')[0] || street))) {
+      clue = `The trail is the ${quest.category.toLowerCase()} site on ${street}. ${clue}`.trim()
       clueKey = foldName(clue)
     }
     clues.add(clueKey)
 
-    let hint = quest.default_hint
-    if (kept.some(item => foldName(item.default_hint) === foldName(hint))) {
-      hint = `${hint} Stay with ${street}.`
+    let hint = stripMetaUniqueness(quest.default_hint)
+    if (kept.some(item => foldName(item.default_hint) === foldName(hint)) || (street && !foldName(hint).includes(foldName(street).split(' ')[0] || street))) {
+      hint = `Stay on ${street}. ${hint}`.trim()
     }
 
-    kept.push({ ...quest, title, clue, default_hint: hint })
+    const bonus = stripMetaUniqueness(quest.bonus_hint)
+    kept.push({ ...quest, title, clue, default_hint: hint, bonus_hint: bonus })
   }
   return kept
 }
@@ -651,7 +730,12 @@ Prior case reactions — lean toward what they loved. If they passed / disliked 
 ${priorLines}
 
 Write one distinct case for each of the following real places. You know the true name. The player must not.
-If several belong to the same specialty, they are still SEPARATE files: different venue, different quarter, different title, different clues. A traveler who solved one must not be able to use that walk to close another.
+If several belong to the same specialty, they are still SEPARATE files: different venue, different quarter, different kind of place, different clues.
+A traveler who solved one must not be able to use that walk to close another.
+Use the Address, Types, and Summary as the clues.
+Hint 1 must be a direct statement of function, appearance, history or age, location, or civic significance, spoken as a night-clerk briefing. Pull age, role, and look from the Summary whenever it exists. Name the street or quarter from the Address line.
+Hints 2 and 3 keep the same diction: pavement tells, then evidence to file.
+Do not invent a canal, hill, or spire that is not implied by that place.
 
 ${placeLines}
 
@@ -662,14 +746,14 @@ Return JSON only, in this shape:
       "category": "Landmarks",
       "title": "enigmatic case-file title",
       "place_name": "exact true name from the briefing",
-      "clue": "hint 1, least specific",
-      "default_hint": "hint 2, narrower",
-      "bonus_hint": "hint 3, most specific without naming"
+      "clue": "hint 1: clear facts in mystery diction — function, look, age, location, or significance",
+      "default_hint": "hint 2: pavement recognition, still a briefing",
+      "bonus_hint": "hint 3: confirmation to file as evidence, still without the proper name"
     }
   ]
 }
 
-Each hint is two to four sentences, second person, as a briefing from the Midnight Express Detective Agency.`
+Each hint is two to four sentences, second person, MotME night-clerk voice. Hint 1 stays short, factual, and atmospheric.`
 }
 
 async function writeWithGemini(prompt: string, apiKey: string): Promise<GeneratedQuest[]> {
@@ -681,7 +765,7 @@ async function writeWithGemini(prompt: string, apiKey: string): Promise<Generate
     const body = {
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
-        temperature: 0.85,
+        temperature: 0.45,
         responseMimeType: 'application/json',
       },
     }
@@ -758,9 +842,9 @@ function polishQuests(
       place_name: place.name,
       place_address: place.address,
       place_types: place.types,
-      clue: redactName(match.clue, place.name),
-      default_hint: redactName(match.default_hint, place.name),
-      bonus_hint: redactName(match.bonus_hint, place.name),
+      clue: stripMetaUniqueness(redactName(match.clue, place.name)),
+      default_hint: stripMetaUniqueness(redactName(match.default_hint, place.name)),
+      bonus_hint: stripMetaUniqueness(redactName(match.bonus_hint, place.name)),
     }
   })
 }

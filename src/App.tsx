@@ -4,6 +4,7 @@ import AccountPage from './AccountPage'
 import AlbumPage from './AlbumPage'
 import IntroPage, { AuthGateSplash, ClerkIntroPage } from './IntroPage'
 import { countryByName } from './data/countries'
+import { QUEST_VARIANTS } from './data/quest-variants'
 import { guessMatchesPlace } from './lib/identify'
 import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, persistTrip, secretForQuest, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
 import { createCitySession, listCities, resolveCity, searchCountries, suggestCities, type CitySuggestion } from './lib/destinations'
@@ -50,83 +51,23 @@ const INTEREST_META: { id: Interest; label: string; code: string }[] = [
   { id: 'Shopping',     label: 'Markets',     code: 'VII' },
 ]
 
-const QUEST_TEMPLATES: Record<Interest, { title: string; hints: string[] }> = {
-  Landmarks: {
-    title: 'The Sentinel of the Old Quarter',
-    hints: [
-      "They say the stones here remember every secret spoken in their shadow. Seek the structure that has kept watch over this city since before the railway age — find the spire that catches the morning light before anything else does.",
-      "The entrance faces east, toward the sunrise. A small plaque near the left door bears a date older than the railway. Count the steps to the threshold. The number matters.",
-      "In the northeast corner, behind the third column from the entrance, there is a carved face — a detail most visitors walk past without seeing. File it as your evidence.",
-    ],
-  },
-  Food: {
-    title: "The Spice Merchant's Cache",
-    hints: [
-      "Every great investigation follows the aroma. Somewhere in this city, a vendor sells a regional blend unique to this place — the locals call it by a name with no direct translation. Track it down by smell before sight.",
-      "The stall you seek occupies a corner position. The blend is sold only in wax-paper packets, never jars. The merchant knows you are looking before you ask.",
-      "Sample the blend. Order the dish that uses it. Ask the vendor how long the recipe has been in the family. Note the answer precisely — it is the key to this case.",
-    ],
-  },
-  Museums: {
-    title: 'The Gallery of Buried Hours',
-    hints: [
-      "Within these halls, a single object holds a story that contradicts the official record. Your assignment: locate the second floor, third room from the east wing. Something there does not belong to its century.",
-      "The object in question is not the centerpiece of its case — it is a secondary item, partially obscured by a larger artifact. Look to the lower shelf, toward the rear.",
-      "Read the entire placard carefully. The date given is disputed by scholars whose names appear nowhere in this museum. That deliberate omission is the point of this case.",
-    ],
-  },
-  Nature: {
-    title: 'The Garden of Unfinished Maps',
-    hints: [
-      "A cartographer once wrote that this city's green spaces contain more stories than its libraries. Find the oldest living thing in the principal park — it bears a brass marker at its base, worn smooth by many palms over many years.",
-      "At the hour when the light turns amber and horizontal, a particular bench near the old fountain is always empty — even in summer. Locals will not sit there. Ask one why.",
-      "Photograph the tree's canopy from directly beneath it, looking upward. The pattern of the branches resembles a river delta seen from altitude. Or so the cartographer once claimed, in a letter never sent.",
-    ],
-  },
-  Nightlife: {
-    title: 'The Lantern and the Last Round',
-    hints: [
-      "At a certain hour — neither early evening nor true midnight, but the charged in-between — a particular establishment serves the drink that has been this city's quiet comfort since before the last war. Find it before last call.",
-      "The sign above the door is painted, not illuminated. The door handle is brass, worn smooth on the right side from a century of hands. Inside, the bar runs along the left wall.",
-      "Order the house specialty. The barman will not write it on a menu for you. Ask directly. It has no translation. This is entirely by design. Note what it tastes like in your own words.",
-    ],
-  },
-  Architecture: {
-    title: 'The Facade with Two Centuries',
-    hints: [
-      "Somewhere in the old quarter, a building presents one architectural period to the street and conceals an entirely different era in its inner courtyard. From outside, unremarkable. From within, extraordinary.",
-      "The building does not appear on tourist maps. Find it through an archway — the street entrance is a plain wooden door between two shops. The courtyard holds a small fountain, now permanently dry.",
-      "Photograph the dry fountain and the carved lintel above the inner door. The two dates carved there span three centuries. Both are correct. The contradiction between them is this investigation's resolution.",
-    ],
-  },
-  Shopping: {
-    title: 'The Market of Last Objects',
-    hints: [
-      "In every city there is a market where the past surfaces briefly before disappearing again. The object you seek is not valuable by price — only by story. Find something bearing a monogram, a date, or a dedication from another life.",
-      "The market operates on weekend mornings only. The vendor with the most interesting objects arrives last and sets up near the corner with the loudest crowd — but is themselves very quiet.",
-      "Handle at least three objects and ask each vendor one question: where did this come from? Record the most honest answer. Purchase only what speaks directly to you. Restraint is evidence of discipline.",
-    ],
-  },
-}
-
-function buildQuests(interests: Interest[], counts?: Record<Interest, number>): Quest[] {
+function buildQuests(interests: Interest[], counts?: Record<Interest, number>, city = ""): Quest[] {
+  const where = city.trim() || "this city"
   const list: Quest[] = []
-  const trails = ['the northeast approach', 'the canal-side lane', 'the hill above the station', 'the market quarter', 'the old walls', 'the far bridge', 'the quieter sestiere', 'the garden edge', 'the last café before the depot', 'the courtyard behind the laundry']
   for (const interest of interests) {
     const n = Math.max(1, counts?.[interest] ?? 1)
+    const variants = QUEST_VARIANTS[interest]
     for (let copy = 0; copy < n; copy += 1) {
-      const trail = trails[copy % trails.length]
+      const variant = variants[copy % variants.length]
       list.push({
         id: `q${list.length}`,
         category: interest,
-        title: n > 1 ? `${QUEST_TEMPLATES[interest].title} — ${trail}` : QUEST_TEMPLATES[interest].title,
-        hints: QUEST_TEMPLATES[interest].hints.map(hint =>
-          n === 1 ? hint : `${hint} This file follows ${trail}; it is not the same walk as the other ${interest.toLowerCase()} cases.`,
-        ),
+        title: variant.title,
+        hints: variant.hints.map(hint => hint.replace(/\{city\}/g, where)),
         unlockedHints: 1,
         solved: false,
         photoUrl: null,
-        note: '',
+        note: "",
         liked: null,
         justUnlocked: false,
         justSolved: false,
@@ -1556,6 +1497,68 @@ function QuestCard({ quest, keys, onOpen, onSpendKey }: { quest: Quest; keys: nu
    ROOT APP
 ═══════════════════════════════════════════════════════════ */
 
+function isLegacyTemplateQuest(quest: { title?: string; hints?: string[]; placeName?: string }) {
+  if (quest.placeName) return false
+  const title = quest.title || ""
+  const text = (quest.hints || []).join(" ")
+  return (
+    /not the same walk as the other/i.test(text) ||
+    /this file follows /i.test(text) ||
+    /stones here remember every secret/i.test(text) ||
+    /the sentinel of the old quarter/i.test(title) ||
+    /the spice merchant/i.test(title) ||
+    /the gallery of buried hours/i.test(title) ||
+    /the garden of unfinished maps/i.test(title) ||
+    /the lantern and the last round/i.test(title) ||
+    /the facade with two centuries/i.test(title) ||
+    /the market of last objects/i.test(title)
+  )
+}
+
+function refreshTemplateQuest(quest: Quest, city: string): Quest {
+  const variants = QUEST_VARIANTS[quest.category]
+  if (!variants?.length || quest.placeName) return migrateLegacyTemplateQuest(quest, city)
+  const where = city.trim() || "this city"
+  const byTitle = variants.find(variant => variant.title === quest.title)
+  if (byTitle) {
+    return {
+      ...quest,
+      hints: byTitle.hints.map(hint => hint.replace(/\{city\}/g, where)),
+    }
+  }
+  return migrateLegacyTemplateQuest(quest, city)
+}
+
+function migrateLegacyTemplateQuest(quest: Quest, city: string): Quest {
+  if (!isLegacyTemplateQuest(quest)) return quest
+  const variants = QUEST_VARIANTS[quest.category]
+  if (!variants?.length) return quest
+  const trails = [
+    "the northeast approach",
+    "the canal-side lane",
+    "the hill above the station",
+    "the market quarter",
+    "the old walls",
+    "the far bridge",
+    "the quieter sestiere",
+    "the garden edge",
+    "the last cafe before the depot",
+    "the last café before the depot",
+    "the courtyard behind the laundry",
+  ]
+  const text = quest.hints.join(" ").toLowerCase()
+  let index = trails.findIndex(trail => text.includes(trail))
+  if (index === 9) index = 8
+  if (index < 0) index = 0
+  const variant = variants[index % variants.length]
+  const where = city.trim() || "this city"
+  return {
+    ...quest,
+    title: variant.title,
+    hints: variant.hints.map(hint => hint.replace(/\{city\}/g, where)),
+  }
+}
+
 function toStoredQuests(items: Quest[]): StoredQuest[] {
   return items.map(({ justUnlocked: _u, justSolved: _s, ...quest }) => quest)
 }
@@ -1563,14 +1566,14 @@ function toStoredQuests(items: Quest[]): StoredQuest[] {
 function fromStoredTrip(trip: StoredTrip): Quest[] {
   return trip.quests.map(quest => {
     const secret = secretForQuest(trip.city, trip.country, quest)
-    return {
+    return refreshTemplateQuest({
       ...quest,
       category: quest.category as Interest,
       placeName: secret.placeName,
       placeAddress: secret.placeAddress,
       justUnlocked: false,
       justSolved: false,
-    }
+    }, trip.city)
   })
 }
 
@@ -1662,7 +1665,7 @@ function AppShell({
       if (nextQuests.length === 0) throw new Error('No quests returned')
     } catch (err) {
       console.error('Falling back to static quest templates:', err)
-      nextQuests = buildQuests(interests, counts)
+      nextQuests = buildQuests(interests, counts, ct)
     }
 
     upsertDossierCases(nextQuests.map(quest => ({
