@@ -380,6 +380,63 @@ export function prefersHidden(preferences: PreferenceMap) {
   return hidden.includes('offbeat') || hidden.includes('secret-spots') || hidden.includes('neighborhoods')
 }
 
+const CATEGORY_PREF_GROUPS: Record<string, string[]> = {
+  Food: ['food'],
+  Shopping: ['shops'],
+  Nature: ['nature'],
+  Museums: ['history', 'culture'],
+  Nightlife: ['food', 'culture', 'hidden'],
+  Architecture: ['history', 'culture'],
+  Landmarks: ['history', 'culture', 'hidden'],
+}
+
+const OSM_TYPE_ALIAS: Record<string, string> = {
+  attraction: 'tourist_attraction',
+  artwork: 'tourist_attraction',
+  monument: 'tourist_attraction',
+  fast_food: 'meal_takeaway',
+  gallery: 'art_gallery',
+  garden: 'park',
+  nature_reserve: 'park',
+}
+
+function cardTypesOf(card: CatalogLike) {
+  const types = new Set(
+    [...(card.placeTypes || []), card.primaryType || '']
+      .map(type => type.toLowerCase().replace(/^\w+\./, ''))
+      .filter(Boolean),
+  )
+  for (const type of [...types]) {
+    const alias = OSM_TYPE_ALIAS[type]
+    if (alias) types.add(alias)
+  }
+  return types
+}
+
+export function cardFitsPreferences(card: CatalogLike, category: string, preferences: PreferenceMap) {
+  const groups = new Set(CATEGORY_PREF_GROUPS[category] || [])
+  const wanted = new Set<string>()
+  let hasRelevant = false
+  for (const [group, subs] of Object.entries(preferences || {})) {
+    if (!groups.has(group) && group !== 'hidden') continue
+    for (const sub of subs || []) {
+      const mapped = TAXONOMY_TYPES[`${group}:${sub}`]
+      if (mapped?.length) {
+        hasRelevant = true
+        for (const type of mapped) wanted.add(type)
+      } else if (group === 'hidden') {
+        hasRelevant = true
+      }
+    }
+  }
+  if (prefersHidden(preferences) && (card.ratingsCount || 0) > 12000) return false
+  if (!hasRelevant) return true
+  if (wanted.size === 0) return true
+  const types = cardTypesOf(card)
+  for (const type of types) if (wanted.has(type)) return true
+  return false
+}
+
 export function scoreCatalogCard(
   card: CatalogLike,
   category: string,
@@ -447,6 +504,7 @@ export function pickCatalogCards(
     const name = foldKey(card.googlePlaceName)
     if (name && used.has(name)) return false
     if (already.some(item => cardsTooSimilar(item, card))) return false
+    if (!cardFitsPreferences(card, category, preferences)) return false
     return true
   })
 
@@ -596,6 +654,19 @@ export async function savePlaceCard(card: PlaceCardInsert): Promise<CatalogCard 
   }
 }
 
+export async function loadPlaceCardsByIds(ids: string[]) {
+  const unique = [...new Set(ids.filter(Boolean))]
+  if (unique.length === 0) return [] as CatalogCard[]
+  try {
+    const rows = await db.select().from(placeCards).where(inArray(placeCards.id, unique))
+    const byId = new Map(rows.map(row => [row.id, fromRow(row)]))
+    return unique.map(id => byId.get(id)).filter((card): card is CatalogCard => Boolean(card))
+  } catch (error) {
+    console.error('place card id load failed:', error)
+    return []
+  }
+}
+
 export function catalogToQuest(card: CatalogCard) {
   return withPlaceFacts(
     {
@@ -607,6 +678,7 @@ export function catalogToQuest(card: CatalogCard) {
       clue: card.hint1,
       default_hint: card.hint2,
       bonus_hint: card.hint3,
+      hints: [card.hint1, card.hint2, card.hint3],
       place_card_id: card.id,
       gemini_description: card.geminiDescription,
     },

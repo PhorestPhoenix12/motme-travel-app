@@ -139,7 +139,11 @@ async function buildQuestsFromApi(
     placeType: q.place_type || q.place_types?.[0],
     placeTypes: q.place_types,
     placeDescription: q.description || q.gemini_description,
-    hints: q.hints?.length === 3 ? q.hints : [q.clue || '', q.default_hint || '', q.bonus_hint || ''],
+    hints: [
+      q.clue || q.hints?.[0] || '',
+      q.default_hint || q.hints?.[1] || '',
+      q.bonus_hint || q.hints?.[2] || '',
+    ],
     unlockedHints: 1,
     solved: false,
     photoUrl: null,

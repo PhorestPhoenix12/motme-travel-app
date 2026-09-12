@@ -9,6 +9,7 @@ import {
   hintCarriesIdentity,
   identityFactsOf,
   loadPlaceCards,
+  loadPlaceCardsByIds,
   pickCatalogCards,
   prefersHidden,
   questHasPlaceFacts,
@@ -1541,10 +1542,9 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
       }))
       .filter(item => item.needed > 0)
 
-    let selected: Array<PlaceCandidate & { category: string }> = []
     let minted: GeneratedQuest[] = []
     if (shortfalls.length > 0) {
-      selected = await choosePlacesForNeeds({
+      const selected = await choosePlacesForNeeds({
         city,
         country,
         shortfalls,
@@ -1558,35 +1558,20 @@ export async function handleGenerateQuests(req: IncomingMessage, res: ServerResp
       minted = await persistChosenCards(selected, drafted, selectedCards, city, country)
     }
 
-    if (selectedCards.length === 0 && minted.length === 0) {
-      send(res, 502, { error: 'The field office found no venues in that city.' })
-      return true
-    }
-
+    const filed = await loadPlaceCardsByIds([
+      ...selectedCards.map(card => card.id),
+      ...minted.map(quest => quest.place_card_id || ''),
+    ])
     const seenVenues = new Set<string>()
-    const quests = ensureDistinctQuests(
-      [...selectedCards.map(catalogToQuest), ...minted]
-        .map(quest => {
-          const place = selected.find(item => foldName(item.name) === foldName(quest.place_name))
-          const card = selectedCards.find(item => foldName(item.googlePlaceName) === foldName(quest.place_name))
-          return withPlaceFacts(quest, {
-            name: place?.name || card?.googlePlaceName,
-            address: place?.address || card?.address,
-            types: place?.types || card?.placeTypes,
-            primaryType: place?.primaryType || card?.primaryType,
-            summary: place?.summary || card?.googleSummary || card?.geminiDescription,
-            city,
-            country,
-          })
-        })
-        .filter(quest => {
-          if (!questHasPlaceFacts(quest)) return false
-          const key = foldName(quest.place_name) || foldName(quest.title)
-          if (!key || seenVenues.has(key)) return false
-          seenVenues.add(key)
-          return true
-        }),
-    )
+    const quests = filed
+      .map(catalogToQuest)
+      .filter(quest => {
+        if (!questHasPlaceFacts(quest) || !quest.place_card_id) return false
+        const key = foldName(quest.place_name) || foldName(quest.title)
+        if (!key || seenVenues.has(key)) return false
+        seenVenues.add(key)
+        return true
+      })
 
     if (quests.length === 0) {
       send(res, 502, { error: 'The field office found no complete venues in that city.' })
