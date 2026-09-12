@@ -5,7 +5,7 @@ import AlbumPage from './AlbumPage'
 import IntroPage, { AuthGateSplash, ClerkIntroPage } from './IntroPage'
 import { countryByName } from './data/countries'
 import { QUEST_VARIANTS } from './data/quest-variants'
-import { guessMatchesPlace } from './lib/identify'
+import { guessFitsCase } from './lib/identify'
 import { collectPriorCases, fileToCompressedDataUrl, loadAllTripsRemote, loadTripLocal, loadTripRemote, persistTrip, secretForQuest, upsertDossierCases, type PriorCase, type StoredQuest, type StoredTrip } from './lib/persist'
 import { createCitySession, listCities, resolveCity, searchCountries, suggestCities, type CitySuggestion } from './lib/destinations'
 
@@ -933,7 +933,12 @@ function CasesPage({
     setModalError(null)
 
     const secret = secretForQuest(city, country, q)
-    let matched = guessMatchesPlace(guess, secret.placeName, secret.placeAddress)
+    let matched = guessFitsCase(guess, {
+      placeName: secret.placeName,
+      address: secret.placeAddress,
+      title: q.title,
+      hints: q.hints,
+    })
     if (!matched) {
       try {
         const response = await fetch('/api/verify-guess', {

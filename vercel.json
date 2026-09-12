@@ -19,7 +19,8 @@
       "includeFiles": "src/lib/**"
     },
     "api/verify-guess.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "src/lib/**"
     },
     "api/me/profile.ts": {
       "maxDuration": 60

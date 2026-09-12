@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import tls from 'node:tls'
-import { guessMatchesPlace } from '../../src/lib/identify'
+import { guessFitsCase } from '../../src/lib/identify'
 
 try {
   tls.setDefaultCACertificates([
@@ -924,7 +924,12 @@ async function handleVerifyGuess(req: IncomingMessage, res: ServerResponse): Pro
       return true
     }
 
-    if (guessMatchesPlace(guess, placeName, placeAddress)) {
+    if (guessFitsCase(guess, {
+      placeName,
+      address: placeAddress,
+      title: payload.title,
+      hints: payload.hints,
+    })) {
       send(res, 200, { match: true })
       return true
     }
@@ -937,22 +942,27 @@ async function handleVerifyGuess(req: IncomingMessage, res: ServerResponse): Pro
 
     const judged = await askGeminiJson(
       `You are the night clerk of MotME — Mystery of the Midnight Express, a 1930s detective-casebook.
-A traveler claims they have identified a real place. Decide if their identification refers to THIS venue — by official name, common nickname, street, or a description specific enough that a local would not confuse it with another site.
+A traveler claims they have identified a real place. Be generous. Accept the identification if it is even vaguely correct or clearly related to THIS venue.
 
-True place name: ${placeName || 'unknown'}
+True place name: ${placeName || 'not on the public docket — judge from the clues'}
 Address: ${placeAddress || 'unlisted'}
 City: ${[payload.city, payload.country].filter(Boolean).join(', ') || 'unlisted'}
 Case title (not the place name): ${payload.title || 'unlisted'}
-Clues already issued (do not quote these back as if they were a correct identification): ${(payload.hints || []).join(' | ') || 'none'}
+Clues already issued: ${(payload.hints || []).join(' | ') || 'none'}
 
 Traveler's identification:
 """${guess}"""
 
-Rules:
-- match is true only if they mean this exact venue.
-- Vague answers such as "the museum", "a church", "the old square", or repeating the case title are false.
-- Nicknames, translations, and partial proper names are true when unmistakable.
-- Do not reveal the true name in your reason if match is false. Stay in period character. No modern app language.
+Match is TRUE when any of these hold:
+- official name, translation, nickname, abbreviation, or common misspelling
+- a distinctive part of the name (one clear word is enough: Rialto, Uffizi, Accademia, San Marco)
+- a description of this venue's function, look, age, or location that a local would connect to it
+- they named a real site in this city that fits the clues, if no official name is on the docket
+- they used a related type word that fits this file (the old bridge, the parish tower, the gallery) even if inexact
+
+Match is FALSE only when they named a different specific place, or the guess is empty of meaning ("something", "idk", the case title copied back with no place in it).
+
+Do not reveal the true name in your reason if match is false. Stay in period character. No modern app language.
 
 Return JSON only: { "match": true, "reason": "one short sentence" }`,
       gemini,
