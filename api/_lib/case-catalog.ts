@@ -496,6 +496,7 @@ export function pickCatalogCards(
   prior: CatalogPrior[],
   already: CatalogCard[],
   preferences: PreferenceMap,
+  strictPreferences = true,
 ) {
   const used = usedPlaceNames(prior)
   const candidates = pool.filter(card => {
@@ -504,7 +505,7 @@ export function pickCatalogCards(
     const name = foldKey(card.googlePlaceName)
     if (name && used.has(name)) return false
     if (already.some(item => cardsTooSimilar(item, card))) return false
-    if (!cardFitsPreferences(card, category, preferences)) return false
+    if (strictPreferences && !cardFitsPreferences(card, category, preferences)) return false
     return true
   })
 
